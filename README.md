@@ -1,63 +1,103 @@
 # v3compat-runtime
 
-Runs container images that need x86-64-v3 (AVX2, BMI2, FMA) on older CPUs under
-[Intel SDE](https://www.intel.com/content/www/us/en/developer/articles/tool/software-development-emulator.html),
-through an OCI runtime wrapper for containerd + runc (Kubernetes).
+Runs container images built for x86-64-v3 (AVX2, BMI2, FMA, LZCNT, MOVBE) on CPUs without it, through
+an OCI runtime wrapper for containerd + runc (Kubernetes). The translation is
+[lhns/v3compat](https://github.com/lhns/v3compat): a DynamoRIO client behind a static launcher,
+`v3compat-run`. Its docs hold the details this README does not repeat.
 
-**SDE is a slow fallback, not a fast path.** It is a binary translator: expect tens of seconds of startup and
-compute 35-80 times slower than native (measured on DuckDB; your workload will differ). Every
-process started in a wrapped container pays that startup, `kubectl exec` and exec probes included, so
-use HTTP or TCP probes and a startup probe that allows for it. Use it to
-let a pod run on an old node at all, not to run heavy pods there.
+**Translation is a slow fallback, not a fast path.** Every process in a wrapped container starts under
+DynamoRIO, and `kubectl exec` and exec probes too: several seconds on Ivy Bridge for duckdb. Prefer HTTP or TCP
+probes and a generous startup probe. Use it to let a pod run on an old node at all.
 
 ## How it works
 
-Pods opt in with a RuntimeClass whose handler is `sde`. Other pods keep the default handler and never
-see the wrapper. For each container created through that handler, `sde-runtime`:
+Pods opt in with a RuntimeClass whose handler is `v3compat`; other pods never see the wrapper. For each
+container created through that handler, `v3compat-runtime`:
 
-1. passes through untouched if the CPU has x86-64-v3 (AVX, AVX2, BMI1, BMI2, FMA). The same pod runs
-   natively on new nodes and under SDE only on old ones;
-2. otherwise edits the bundle's `config.json`: bind-mounts the SDE bundle read-only at `/sde`, prefixes
-   `process.args` with `/sde/sde64 -hsw --`, and sets the annotation `sde-runtime.wrapped=true`.
-   An init process (`/sbin/docker-init`, `/run/podman-init`, `/dev/init`) stays native and runs SDE as
-   its child. Pod sandbox (pause) containers are not wrapped;
-3. `exec` into a wrapped container (`kubectl exec`, exec probes) gets the same prefix in its process file;
-4. then `execve`s the real runtime with the original arguments. Every other subcommand does only that,
-   without forking. SDE follows `exec` of child processes by default.
+1. **Translates by default**, on every CPU. It passes the container through natively only when the node
+   was installed with `install.sh --native` (`native = true`, written for nodes labelled as v3, ADR 0004)
+   **and** CPUID confirms x86-64-v3. If `native = true` on a CPU without v3, it translates and logs a
+   warning: translation is correct on any CPU, native on an old one silently miscomputes lzcnt/tzcnt;
+2. edits the bundle's `config.json`: bind-mounts the bundle read-only at `/v3compat`, prefixes
+   `process.args` with `/v3compat/bin/v3compat-run --`, and sets the annotation `v3compat.wrapped=true`.
+   An init process (`/sbin/docker-init`, `/run/podman-init`, `/dev/init`) stays native and runs the
+   launcher as its child. Pod sandbox (pause) containers are not wrapped;
+3. gives `exec` into a wrapped container (`kubectl exec`, exec probes) the same prefix in its process file;
+4. `execve`s the real runtime with the original arguments. Every other subcommand does only that.
+   DynamoRIO follows `exec` into child processes.
 
-Any error (broken config, missing bundle, unparsable spec) is logged and the invocation passes through
-unchanged. The wrapper never writes to stdout/stderr. Logs go to syslog (`sde-runtime`) and
-`/var/log/sde-runtime.log`.
+**Fail-open.** Any error (broken config, missing bundle, unparsable spec) is logged and the container
+runs unwrapped (ADR 0004). On a node without AVX2 a v3 program then dies with SIGILL, or, for
+lzcnt/tzcnt, silently computes bsr/bsf. This is a known risk, not handled here. The wrapper never writes
+to stdout/stderr; logs go to syslog (`v3compat-runtime`) and `/var/log/v3compat-runtime.log`.
 
-Not supported: images without a glibc, automatic detection of images that need v3 (opt in by RuntimeClass),
-CPUs without AVX. Only the runc command line is tested; the argument handling is runtime-neutral.
+### Translation cache mount
+
+If `cache_root` is set and the image reference (annotation `io.kubernetes.cri.image-name`) ends in
+`@sha256:<64 hex>`, and `<cache_root>/sha256-<hex>` is a directory, that directory is bind-mounted
+read-only at `/v3compat-cache` (executable: DynamoRIO may map entries). Otherwise nothing is mounted;
+`cache_root` itself never is. No environment variable is set: the launcher's cache option is later work.
+
+## Exit statuses
+
+Of the wrapped process, from `v3compat-run` (details: v3compat `docs/plan.md`, "Launcher and exec follow").
+Application statuses and signals pass through.
+
+| status | meaning for a pod |
+| --- | --- |
+| 40 | DynamoRIO cannot handle a signal the program got |
+| 86 | the program hit an instruction form that is not on the audited list; it was refused, not guessed |
+| 87 | the launcher refused the program: setuid/setgid/file capabilities where privileges would change, unreadable, or 32-bit |
+| 89 | a vfork child was killed holding a DynamoRIO lock; the process ends |
+| 125 | launcher failure |
+| 126, 127 | not executable, not found, as in a shell |
+
+An exec refused deeper in the process tree fails with EPERM or ENOEXEC and a message on stderr instead.
+
+## Limits
+
+- The image needs no glibc: the launcher and DynamoRIO need nothing from it (v3compat measured static,
+  static-PIE and musl programs). The bundle's own self-containment is checked by v3compat's
+  `release.yml`; this README claims no more.
+- Every process pays DynamoRIO's startup, exec probes included.
+- `/proc/self/maps` lists DynamoRIO, and `DYNAMORIO_*` variables are visible to the program.
+- Setuid, setgid and file-capability programs and 32-bit children are refused (87, or an errno below the top process).
+- A vfork child killed while holding a DynamoRIO lock ends the process with 89.
+- Not supported: CPUs without AVX, automatic detection of images that need v3 (opt in by RuntimeClass).
+- Only the runc command line is tested; the argument handling is runtime-neutral.
 
 ## Build and install
 
-SDE is Intel's software under its own license and is never part of this repo or its releases.
+v3compat and DynamoRIO may be redistributed; their notices are in the bundle's `share/doc/v3compat/`.
 
-    docker run --rm -v "$PWD":/w -w /w debian:stable bundle/build.sh --accept-intel-license
-    go build -o sde-runtime ./cmd/v3compat-runtime
-    sudo install/install.sh          # binary, bundle, config, k0s handler drop-in
+    bundle/get.sh                    # the release pinned in bundle/pin.env (none yet: use one of the next two)
+    bundle/get.sh --source           # build the pinned commit: cmake, gcc, g++, git, patch, zlib1g-dev; ~10 min first time
+    bundle/get.sh --tarball PATH     # a local release tarball; prints its sha256
+    go build -o v3compat-runtime ./cmd/v3compat-runtime
+    sudo install/install.sh          # binary, bundle, config, k0s handler drop-in; native = false
+    sudo install/install.sh --native # for nodes labelled x86-64-v3: native = true
     sudo install/install.sh --uninstall
 
-`bundle/build.sh` downloads the pinned SDE, checks its sha256 and asks you to accept Intel's license
-(`--accept-intel-license` or `SDE_ACCEPT_LICENSE=1`). To use a tarball you downloaded yourself, pass
-`--tarball PATH`. Do not publish the result. Files are not patched (`bundle/INVENTORY.md`).
+`install.sh` always sets `native` in `/etc/v3compat-runtime/config.toml`: written explicitly in a new
+file; in an existing file only that line is rewritten (other keys stay; the config has no tables).
 
-Install the handler on every node that may run opted-in pods: a RuntimeClass whose handler is missing
-fails the pod. On nodes with x86-64-v3 the wrapper just passes through.
+Install the handler on every node that may run opted-in pods: a RuntimeClass whose handler is missing fails
+the pod.
+
+**Replacing an old SDE install.** The installer does not touch it. Remove it by hand: run the old
+version's `install.sh --uninstall`, or delete `/usr/local/bin/sde-runtime`, `/opt/sde-bundle`,
+`/etc/sde-runtime` and `/etc/k0s/containerd.d/50-sde-runtime.toml`, and the `sde` RuntimeClass.
 
 ## k0s / containerd
 
-`install/install.sh` writes `/etc/k0s/containerd.d/50-sde-runtime.toml` (containerd config v2 syntax):
+`install/install.sh` writes `/etc/k0s/containerd.d/50-v3compat-runtime.toml` (containerd config v2 syntax):
 
 ```toml
 version = 2
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sde]
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.v3compat]
   runtime_type = "io.containerd.runc.v2"
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sde.options]
-    BinaryName = "/usr/local/bin/sde-runtime"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.v3compat.options]
+    BinaryName = "/usr/local/bin/v3compat-runtime"
 ```
 
 With containerd 2 / config `version = 3` the plugin is `io.containerd.cri.v1.runtime` instead of
@@ -67,38 +107,38 @@ With containerd 2 / config `version = 3` the plugin is `io.containerd.cri.v1.run
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
-  name: sde
-handler: sde
+  name: v3compat
+handler: v3compat
 ---
 # in the pod spec
 spec:
-  runtimeClassName: sde
+  runtimeClassName: v3compat
 ```
 
 ## Configuration
 
-`/etc/sde-runtime/config.toml`, all keys optional (defaults shown). A missing file means defaults; an
+`/etc/v3compat-runtime/config.toml`, all keys optional (defaults shown). A missing file means defaults; an
 invalid one means pass-through.
 
 ```toml
 real_runtime = "/var/lib/k0s/bin/runc"   # the runtime to exec
-bundle_path  = "/opt/sde-bundle"         # host path, mounted at /sde
-chip         = "hsw"                     # sde64 -<chip>
-extra_args   = []                        # more sde64 arguments
+bundle_path  = "/opt/v3compat"           # host path, mounted read-only at /v3compat
 init_paths   = ["/sbin/docker-init", "/run/podman-init", "/dev/init"]
-log_file     = "/var/log/sde-runtime.log"
-force_on_capable_host = false            # testing: wrap even on x86-64-v3
+log_file     = "/var/log/v3compat-runtime.log"
+native       = false                     # true: run unwrapped if CPUID shows x86-64-v3 (install.sh --native)
+cache_root   = ""                        # translation cache directories, one per image digest; empty: off
 ```
 
 ## Development
 
-    go test ./...
+    go vet ./... && go test ./...
     GOOS=linux GOARCH=amd64 go build ./cmd/v3compat-runtime
 
-`test/probe` exits 0 only if AVX2, FMA and BMI2 instructions return correct results. An end-to-end run
-needs the SDE bundle (not available in CI) and a node without AVX2 (for example
-`qemu -cpu IvyBridge`); it is not automated.
+CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
+(`bundle/pin.env`), covering translated and native runs, exec, status 87 and the cache mount. The runner has AVX2, where
+the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
 
 ## License
 
-The wrapper is licensed under [Apache-2.0](LICENSE). Intel SDE is not part of this repo and has its own license.
+The wrapper is licensed under [Apache-2.0](LICENSE). v3compat, DynamoRIO and avxemu keep their own licenses
+(in the bundle's `share/doc/v3compat/`).

@@ -2,4 +2,4 @@
 *.tar.gz
 bundle/out/
 test/probe/probe
-/sde-runtime
+/v3compat-runtime

@@ -1,4 +1,4 @@
-// Package config reads /etc/sde-runtime/config.toml. All keys are optional.
+// Package config reads /etc/v3compat-runtime/config.toml. All keys are optional.
 package config
 
 import (
@@ -8,25 +8,26 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const DefaultPath = "/etc/sde-runtime/config.toml"
+const DefaultPath = "/etc/v3compat-runtime/config.toml"
 
 type Config struct {
-	RealRuntime        string   `toml:"real_runtime"`
-	BundlePath         string   `toml:"bundle_path"`
-	Chip               string   `toml:"chip"`
-	ExtraArgs          []string `toml:"extra_args"`
-	InitPaths          []string `toml:"init_paths"`
-	LogFile            string   `toml:"log_file"`
-	ForceOnCapableHost bool     `toml:"force_on_capable_host"` // testing: wrap even on an x86-64-v3 host
+	RealRuntime string   `toml:"real_runtime"`
+	BundlePath  string   `toml:"bundle_path"`
+	InitPaths   []string `toml:"init_paths"`
+	LogFile     string   `toml:"log_file"`
+	// Native runs containers unwrapped on a CPU that reports x86-64-v3. The install writes it for
+	// nodes labelled as v3 (ADR 0004); CPUID only vetoes it. Default false: translate.
+	Native bool `toml:"native"`
+	// CacheRoot holds one directory per image digest (sha256-<hex>); empty disables the cache mount.
+	CacheRoot string `toml:"cache_root"`
 }
 
 func Defaults() Config {
 	return Config{
 		RealRuntime: "/var/lib/k0s/bin/runc",
-		BundlePath:  "/opt/sde-bundle",
-		Chip:        "hsw",
+		BundlePath:  "/opt/v3compat",
 		InitPaths:   []string{"/sbin/docker-init", "/run/podman-init", "/dev/init"},
-		LogFile:     "/var/log/sde-runtime.log",
+		LogFile:     "/var/log/v3compat-runtime.log",
 	}
 }
 
