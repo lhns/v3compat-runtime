@@ -79,7 +79,7 @@ mkdir -p "$w/cache/sha256-$hex"; echo x > "$w/cache/sha256-$hex/entry"
 conf "native = false
 cache_root = \"$w/cache\""
 ann=$(jq -n --arg i "r.example/app:1@sha256:$hex" '{"io.kubernetes.cri.image-name":$i}')
-mkbundle cache 0 /probe cache-ro /v3compat-cache
+mkbundle cachectr 0 /probe cache-ro /v3compat-cache
 run c5; check "cache: matching digest mounted read-only" 0 'dir=1 write errno=30'
 grep -q "image \"r.example/app:1@sha256:$hex\"" "$w/log" || { echo "FAIL image not logged"; fail=1; }
 for img in "r.example/app:1" "r.example/app@sha256:$(printf 'b%.0s' $(seq 64))" "r.example/app@sha256:../../etc"; do
