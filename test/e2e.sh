@@ -82,7 +82,7 @@ jq -e 'select(.level == "error") | .msg | test("bundle missing")' "$w/rlog" >/de
 conf 'native = true'
 mkbundle nativebroken 0 /probe native
 run c8; check "broken bundle on a native node: runs natively" 0 'libdynamorio mapped=0'
-bundle=$real_bundle
+bundle=$real_bundle; conf 'native = false'
 
 # The launcher refuses a setuid-root file run by another user: status 87.
 mkbundle suid 65534 /probe-suid translated
