@@ -26,10 +26,15 @@ container created through that handler, `v3compat-runtime`:
 4. `execve`s the real runtime with the original arguments. Every other subcommand does only that.
    DynamoRIO follows `exec` into child processes.
 
-**Fail-open.** Any error (broken config, missing bundle, unparsable spec) is logged and the container
-runs unwrapped (ADR 0004). On a node without AVX2 a v3 program then dies with SIGILL, or, for
-lzcnt/tzcnt, silently computes bsr/bsf. This is a known risk, not handled here. The wrapper never writes
-to stdout/stderr; logs go to syslog (`v3compat-runtime`) and `/var/log/v3compat-runtime.log`.
+**Fail-closed on translating nodes** (v3compat ADR 0004, amendment 2026-11-22). If `create`, `run` or `exec`
+cannot set up translation (invalid config, missing bundle, unparsable spec, no process file to rewrite), the
+wrapper exits 1 without starting the real runtime: run natively there, a v3 program dies with SIGILL or, for
+lzcnt/tzcnt, silently computes bsr/bsf. The reason goes to stderr and to the runtime's `--log` file, where
+containerd reads it for "OCI runtime create failed" in the pod's events. An invalid config refuses on every node,
+as the `native` flag cannot be read. A native node (`native = true` and CPUID x86-64-v3) never reads the bundle or
+spec, so nothing there can fail. Every other subcommand (`state`, `start`, `kill`, `delete`, ...) passes through
+unchanged, so existing containers can always be managed. Logs go to syslog (`v3compat-runtime`) and
+`/var/log/v3compat-runtime.log`; stdout is never written.
 
 ### Translation cache mount
 
@@ -70,7 +75,10 @@ An exec refused deeper in the process tree fails with EPERM or ENOEXEC and a mes
 
 v3compat and DynamoRIO may be redistributed; their notices are in the bundle's `share/doc/v3compat/`.
 
-    bundle/get.sh                    # the release pinned in bundle/pin.env (none yet: use one of the next two)
+**No v3compat release exists yet**: the owner cuts the first once the open crashes are fixed. Until then build the
+bundle with `bundle/get.sh --source` (the commit pinned in `bundle/pin.env`, the one CI tests).
+
+    bundle/get.sh                    # the release pinned in bundle/pin.env; refuses while none is pinned
     bundle/get.sh --source           # build the pinned commit: cmake, gcc, g++, git, patch, zlib1g-dev; ~10 min first time
     bundle/get.sh --tarball PATH     # a local release tarball; prints its sha256
     go build -o v3compat-runtime ./cmd/v3compat-runtime
@@ -118,7 +126,7 @@ spec:
 ## Configuration
 
 `/etc/v3compat-runtime/config.toml`, all keys optional (defaults shown). A missing file means defaults; an
-invalid one means pass-through.
+invalid one refuses opted-in containers (above).
 
 ```toml
 real_runtime = "/var/lib/k0s/bin/runc"   # the runtime to exec
@@ -135,7 +143,7 @@ cache_root   = ""                        # translation cache directories, one pe
     GOOS=linux GOARCH=amd64 go build ./cmd/v3compat-runtime
 
 CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
-(`bundle/pin.env`), covering translated and native runs, exec, status 87 and the cache mount. The runner has AVX2, where
+(`bundle/pin.env`), covering translated and native runs, exec, refusal without a bundle, status 87 and the cache mount. The runner has AVX2, where
 the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
 
 ## License

@@ -69,6 +69,21 @@ check "exec into a wrapped container is translated" 0 'libdynamorio mapped=1'
 "$runc" --root "$w/state" kill c3 KILL || true
 sleep 1; "$runc" --root "$w/state" delete -f c3 || true
 
+# Fail closed: without a usable bundle a translating node refuses the container; a native node runs it.
+real_bundle=$bundle; bundle=$w/nobundle; mkdir -p "$bundle"
+conf 'native = false'
+mkbundle refused 0 /probe translated
+status=0
+"$wrapper" --root "$w/state" --log "$w/rlog" --log-format json run --bundle "$b" c7 >"$w/out" 2>"$w/err" || status=$?
+check "broken bundle on a translating node: refused" 1 -
+grep -q 'bundle missing' "$w/err" || { echo "FAIL no reason on stderr"; fail=1; }
+jq -e 'select(.level == "error") | .msg | test("bundle missing")' "$w/rlog" >/dev/null || { echo "FAIL no reason in --log"; fail=1; }
+"$runc" --root "$w/state" state c7 >/dev/null 2>&1 && { echo "FAIL c7 exists"; fail=1; }
+conf 'native = true'
+mkbundle nativebroken 0 /probe native
+run c8; check "broken bundle on a native node: runs natively" 0 'libdynamorio mapped=0'
+bundle=$real_bundle
+
 # The launcher refuses a setuid-root file run by another user: status 87.
 mkbundle suid 65534 /probe-suid translated
 run c4; check "setuid-root program as uid 65534: status 87" 87 -

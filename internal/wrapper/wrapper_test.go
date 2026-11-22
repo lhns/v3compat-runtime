@@ -21,6 +21,7 @@ type env struct {
 	logs   []string
 	v3     bool
 	state  func(string, []string, string) (string, error)
+	err    error // of the last prepare
 }
 
 const appCfg = `{"process":{"args":["/app"]},"annotations":{"io.kubernetes.cri.container-type":"container"}}`
@@ -45,13 +46,18 @@ func must(err error) {
 func (e *env) config(s string) { must(os.WriteFile(e.conf, []byte(s), 0o644)) }
 
 func (e *env) prepare(args ...string) string {
-	return Prepare(args, Deps{
+	real, err := Prepare(args, Deps{
 		ConfigPath: e.conf,
 		HostV3:     func() bool { return e.v3 },
 		Logf:       func(_, f string, a ...any) { e.logs = append(e.logs, fmt.Sprintf(f, a...)) },
 		State:      e.state,
 		Getwd:      func() (string, error) { return e.bundle, nil },
 	})
+	e.err = err
+	if err != nil && real != "" {
+		e.t.Fatalf("refused but returned a runtime %q", real)
+	}
+	return real
 }
 
 func (e *env) cfgBytes() string {
@@ -196,12 +202,23 @@ func TestOtherSubcommandsUntouchedAndSilent(t *testing.T) {
 	}
 }
 
-func TestFailOpenBrokenConfig(t *testing.T) {
+// A config that does not parse leaves the native flag unknown: create, run and exec are refused,
+// every other subcommand passes through.
+func TestBrokenConfigRefusesSetupOnly(t *testing.T) {
 	e := newEnv(t)
 	e.config("this = = not toml")
-	got := e.prepare("create", "-b", e.bundle, "c1")
-	if got != "/var/lib/k0s/bin/runc" || e.cfgBytes() != appCfg || !strings.Contains(e.lastLog(), "passing through") {
-		t.Fatalf("%q %v", got, e.logs)
+	for _, c := range [][]string{{"create", "-b", e.bundle, "c1"}, {"run", "c1"}, {"exec", "--process", "/p", "c1"}} {
+		if e.prepare(c...); e.err == nil || !strings.Contains(e.lastLog(), "refusing") {
+			t.Fatalf("%v: %v %v", c, e.err, e.logs)
+		}
+	}
+	if e.cfgBytes() != appCfg {
+		t.Fatal("spec modified")
+	}
+	for _, c := range [][]string{{"state", "c1"}, {"kill", "c1", "KILL"}, {"delete", "-f", "c1"}} {
+		if got := e.prepare(c...); got != "/var/lib/k0s/bin/runc" || e.err != nil || !strings.Contains(e.lastLog(), "passing through") {
+			t.Fatalf("%v: %q %v %v", c, got, e.err, e.logs)
+		}
 	}
 }
 
@@ -213,21 +230,50 @@ func TestMissingConfigUsesDefaults(t *testing.T) {
 	}
 }
 
-func TestFailOpenMissingBundle(t *testing.T) {
+func TestMissingBundleRefuses(t *testing.T) {
 	e := newEnv(t)
 	must(os.Remove(filepath.Join(e.v3c, "bin", "v3compat-run")))
 	e.prepare("create", "-b", e.bundle, "c1")
-	if e.cfgBytes() != appCfg || !strings.Contains(e.lastLog(), "bundle missing") {
-		t.Fatal(e.logs)
+	if e.err == nil || e.cfgBytes() != appCfg || !strings.Contains(e.lastLog(), "bundle missing") {
+		t.Fatal(e.err, e.logs)
 	}
 }
 
-func TestFailOpenBrokenSpec(t *testing.T) {
+func TestBrokenSpecRefuses(t *testing.T) {
 	e := newEnv(t)
 	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte("{oops"), 0o644))
 	e.prepare("create", "-b", e.bundle, "c1")
-	if e.cfgBytes() != "{oops" || !strings.Contains(e.lastLog(), "passing through") {
-		t.Fatal(e.logs)
+	if e.err == nil || e.cfgBytes() != "{oops" || !strings.Contains(e.lastLog(), "refused") {
+		t.Fatal(e.err, e.logs)
+	}
+}
+
+// A native node has nothing to translate: a missing bundle or broken spec does not stop it.
+func TestNativeNodePassesThroughErrors(t *testing.T) {
+	e := newEnv(t)
+	e.v3 = true
+	e.nativeConf("native = true\n")
+	must(os.Remove(filepath.Join(e.v3c, "bin", "v3compat-run")))
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte("{oops"), 0o644))
+	if got := e.prepare("create", "-b", e.bundle, "c1"); got != "/real/runc" || e.err != nil {
+		t.Fatal(got, e.err)
+	}
+}
+
+func TestRefuseWritesRuntimeLog(t *testing.T) {
+	dir := t.TempDir()
+	js, txt := filepath.Join(dir, "log.json"), filepath.Join(dir, "log.txt")
+	err := errors.New("c1: v3compat bundle missing")
+	Refuse([]string{"--root", "/r", "--log", js, "--log-format", "json", "create", "c1"}, err)
+	Refuse([]string{"--log=" + txt, "create", "c1"}, err)
+	Refuse([]string{"create", "c1"}, err) // no --log: nothing to write
+	var m map[string]string
+	b, _ := os.ReadFile(js)
+	if json.Unmarshal(b, &m) != nil || m["level"] != "error" || m["msg"] != "v3compat-runtime: c1: v3compat bundle missing" {
+		t.Fatalf("%s", b)
+	}
+	if b, _ := os.ReadFile(txt); !strings.Contains(string(b), `level=error msg="v3compat-runtime: c1: v3compat bundle missing"`) {
+		t.Fatalf("%s", b)
 	}
 }
 
@@ -267,7 +313,7 @@ func TestExecUnmarkedContainerUntouched(t *testing.T) {
 	}
 }
 
-func TestExecFailOpen(t *testing.T) {
+func TestExecRefusesWhenItCannotWrap(t *testing.T) {
 	e := newEnv(t)
 	e.prepare("create", "-b", e.bundle, "c1")
 	proc := filepath.Join(e.dir, "process.json")
@@ -275,13 +321,13 @@ func TestExecFailOpen(t *testing.T) {
 	must(os.WriteFile(proc, []byte(orig), 0o644))
 	e.state = func(string, []string, string) (string, error) { return "", errors.New("no such container") }
 	e.prepare("exec", "--process", proc, "c1")
-	if b, _ := os.ReadFile(proc); string(b) != orig || !strings.Contains(e.lastLog(), "passing through") {
-		t.Fatal(string(b), e.logs)
+	if b, _ := os.ReadFile(proc); string(b) != orig || e.err == nil || !strings.Contains(e.lastLog(), "refused") {
+		t.Fatal(string(b), e.err, e.logs)
 	}
 	e.state = func(string, []string, string) (string, error) { return e.bundle, nil }
 	e.prepare("exec", "c1", "sh") // inline args: no process file
-	if !strings.Contains(e.lastLog(), "inline") {
-		t.Fatal(e.logs)
+	if e.err == nil || !strings.Contains(e.lastLog(), "inline") {
+		t.Fatal(e.err, e.logs)
 	}
 }
 

@@ -37,7 +37,7 @@ done
 if [ "$uninstall" = 1 ]; then
     rm -f "$DROPIN" "$BIN"
     rm -rf "$BUNDLE_DEST"
-    # Keep the config in case it was edited; remove it only if it is the shipped example.
+    # Keep the config: it may have been edited. rmdir removes the directory only if it is empty.
     rmdir "$CONF_DIR" 2>/dev/null || true
     echo "removed; restart k0s/containerd to drop the handler. Pods using the RuntimeClass fail until it is deleted."
     exit 0

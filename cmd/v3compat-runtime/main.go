@@ -19,11 +19,16 @@ import (
 )
 
 func main() {
-	real := wrapper.Prepare(os.Args[1:], wrapper.Deps{
+	real, err := wrapper.Prepare(os.Args[1:], wrapper.Deps{
 		ConfigPath: config.DefaultPath,
 		HostV3:     hostV3,
 		Logf:       logf,
 	})
+	if err != nil {
+		wrapper.Refuse(os.Args[1:], err)
+		fmt.Fprintf(os.Stderr, "v3compat-runtime: %v\n", err)
+		os.Exit(1)
+	}
 	if err := syscall.Exec(real, append([]string{real}, os.Args[1:]...), os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "v3compat-runtime: exec %s: %v\n", real, err)
 		os.Exit(127)
