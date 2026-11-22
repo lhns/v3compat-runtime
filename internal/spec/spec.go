@@ -8,29 +8,41 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 const (
-	AnnotationWrapped = "sde-runtime.wrapped"
-	SDEMount          = "/sde"
-	SDEBinary         = "/sde/sde64"
+	AnnotationWrapped = "v3compat.wrapped"
+	AnnotationImage   = "io.kubernetes.cri.image-name"
+	BundleMount       = "/v3compat"
+	Launcher          = "/v3compat/bin/v3compat-run"
+	CacheMount        = "/v3compat-cache"
 )
 
 type Options struct {
-	BundlePath string   // host path of the SDE bundle, mounted at /sde
-	Chip       string   // for example "hsw"
-	ExtraArgs  []string // extra SDE arguments, before "--"
-	InitPaths  []string // init binaries that stay native and run SDE as their child
+	BundlePath string   // host path of the v3compat bundle, mounted at /v3compat
+	CacheDir   string   // host directory mounted read-only at /v3compat-cache; empty for none
+	InitPaths  []string // init binaries that stay native and run the launcher as their child
 }
 
-func (o Options) prefix() []string {
-	p := append([]string{SDEBinary, "-" + o.Chip}, o.ExtraArgs...)
-	return append(p, "--")
+func prefix() []string { return []string{Launcher, "--"} }
+
+// imageDigest matches a pinned reference. Only lowercase hex follows "@sha256:", so a match
+// holds no path characters.
+var imageDigest = regexp.MustCompile(`@sha256:([0-9a-f]{64})$`)
+
+// ImageDigest returns the hex digest of an image reference that ends in @sha256:<64 hex>.
+func ImageDigest(image string) (string, bool) {
+	m := imageDigest.FindStringSubmatch(image)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
-// WrapArgs prefixes args with the SDE command. It reports false if args are already wrapped
+// WrapArgs prefixes args with the launcher. It reports false if args are already wrapped
 // or empty.
 func WrapArgs(args []string, o Options) ([]string, bool) {
 	if len(args) == 0 {
@@ -49,11 +61,11 @@ func WrapArgs(args []string, o Options) ([]string, bool) {
 		}
 		break
 	}
-	if at >= len(args) || args[at] == SDEBinary {
+	if at >= len(args) || args[at] == Launcher {
 		return args, false
 	}
 	out := append([]string{}, args[:at]...)
-	out = append(out, o.prefix()...)
+	out = append(out, prefix()...)
 	return append(out, args[at:]...), true
 }
 
@@ -88,7 +100,7 @@ func save(path string, d doc, mode os.FileMode) error {
 	if err := enc.Encode(d); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".sde-runtime-*")
+	f, err := os.CreateTemp(filepath.Dir(path), ".v3compat-runtime-*")
 	if err != nil {
 		return err
 	}
@@ -179,21 +191,9 @@ func RewriteConfig(path string, o Options) (bool, error) {
 	if err != nil || !changed {
 		return false, err
 	}
-	mounts, _ := d["mounts"].([]any)
-	have := false
-	for _, e := range mounts {
-		if m, _ := e.(map[string]any); m["destination"] == SDEMount {
-			have = true
-		}
-	}
-	if !have {
-		b, _ := json.Marshal(specs.Mount{
-			Destination: SDEMount, Type: "bind", Source: o.BundlePath,
-			Options: []string{"rbind", "ro", "nosuid", "nodev"},
-		})
-		var m any
-		_ = json.Unmarshal(b, &m)
-		d["mounts"] = append(mounts, m)
+	addMount(d, BundleMount, o.BundlePath)
+	if o.CacheDir != "" {
+		addMount(d, CacheMount, o.CacheDir)
 	}
 	a := annotations(d)
 	if a == nil {
@@ -202,6 +202,34 @@ func RewriteConfig(path string, o Options) (bool, error) {
 	}
 	a[AnnotationWrapped] = "true"
 	return true, save(path, d, mode)
+}
+
+// addMount adds a read-only bind of src at dest unless the spec already mounts something there.
+// noexec is left off: DynamoRIO may map files from the cache.
+func addMount(d doc, dest, src string) {
+	mounts, _ := d["mounts"].([]any)
+	for _, e := range mounts {
+		if m, _ := e.(map[string]any); m["destination"] == dest {
+			return
+		}
+	}
+	b, _ := json.Marshal(specs.Mount{
+		Destination: dest, Type: "bind", Source: src,
+		Options: []string{"rbind", "ro", "nosuid", "nodev"},
+	})
+	var m any
+	_ = json.Unmarshal(b, &m)
+	d["mounts"] = append(mounts, m)
+}
+
+// ImageName returns the io.kubernetes.cri.image-name annotation of config.json, or "".
+func ImageName(path string) (string, error) {
+	d, _, err := load(path)
+	if err != nil {
+		return "", err
+	}
+	s, _ := annotations(d)[AnnotationImage].(string)
+	return s, nil
 }
 
 // RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process).

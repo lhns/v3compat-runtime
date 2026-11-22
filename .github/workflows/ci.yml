@@ -14,4 +14,28 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/v3compat-runtime
-      - run: sh -n install/install.sh && sh -n bundle/build.sh
+      - run: for f in install/install.sh bundle/get.sh test/e2e.sh; do sh -n $f; done
+
+  # The wrapper in front of runc, with the bundle built from the pinned v3compat commit.
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: V3COMPAT_COMMIT
+        run: . bundle/pin.env && echo "V3COMPAT_COMMIT=$V3COMPAT_COMMIT" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/v3compat
+          key: dynamorio-${{ env.V3COMPAT_COMMIT }}
+      - name: Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake g++ git patch zlib1g-dev jq
+          command -v runc >/dev/null || sudo apt-get install -y runc
+      - run: bundle/get.sh --source
+      - run: go build -o v3compat-runtime ./cmd/v3compat-runtime
+      - run: make -C test/probe
+      - run: sudo test/e2e.sh ./v3compat-runtime bundle/out/v3compat test/probe/probe
