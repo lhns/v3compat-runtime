@@ -4,6 +4,7 @@
 //   cache-ro     PATH is a directory on a read-only mount (the translation cache)
 //   cache-none   PATH does not exist
 //   env          print NAME (the second argument) from the environment, "(unset)" if absent
+//   refused      one instruction form off v3compat's audited list (adcx): exit 86 under the client, 0 if it ran
 //   wait         sleep until killed (a long-running container to exec into)
 // Without a mode only the results are checked. Exit 0 on success.
 #include <errno.h>
@@ -50,6 +51,11 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "env")) {
         const char *name = argc > 2 ? argv[2] : "", *v = getenv(name);
         printf("%s=%s\n", name, v ? v : "(unset)");
+        return 0;
+    }
+    if (!strcmp(mode, "refused")) {
+        // adcx %rcx,%rax by raw bytes, as in v3compat's test/refuse_forms.c
+        __asm__ volatile(".byte 0x66, 0x48, 0x0f, 0x38, 0xf6, 0xc1" ::: "rax", "rcx", "cc");
         return 0;
     }
     if (!strcmp(mode, "cache-ro") || !strcmp(mode, "cache-none")) {

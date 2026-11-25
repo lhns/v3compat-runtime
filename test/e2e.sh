@@ -84,6 +84,23 @@ mkbundle nativebroken 0 /probe native
 run c8; check "broken bundle on a native node: runs natively" 0 'libdynamorio mapped=0'
 bundle=$real_bundle; conf 'native = false'
 
+# Statuses of the wrapped process pass through to the container.
+conf 'native = false'
+mkbundle status86 0 /probe refused
+run c9; check "instruction off the audited list: status 86" 86 -
+mkbundle missing 0 /nope
+run c10; check "program not found: status 127" 127 -
+mkbundle noexec 0 /probe-noexec
+cp "$probe" "$b/rootfs/probe-noexec"; chmod 644 "$b/rootfs/probe-noexec"
+run c11; check "program not executable: status 126" 126 -
+# A bundle copy without the client library makes the launcher itself fail.
+rm -rf "$w/bundle125"; cp -a "$bundle" "$w/bundle125"; rm -f "$w/bundle125/libexec/v3compat/libv3compat.so"
+real_bundle=$bundle; bundle=$w/bundle125; conf 'native = false'
+mkbundle launcher 0 /probe translated
+run c12; check "launcher failure: status 125" 125 -
+grep -q 'cannot read' "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+bundle=$real_bundle; conf 'native = false'
+
 # The launcher refuses a setuid-root file run by another user: status 87.
 mkbundle suid 65534 /probe-suid translated
 run c4; check "setuid-root program as uid 65534: status 87" 87 -
