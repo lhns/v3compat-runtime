@@ -39,7 +39,7 @@ if [ "$uninstall" = 1 ]; then
     rm -rf "$BUNDLE_DEST"
     # Keep the config: it may have been edited. rmdir removes the directory only if it is empty.
     rmdir "$CONF_DIR" 2>/dev/null || true
-    echo "removed; restart k0s/containerd to drop the handler. Pods using the RuntimeClass fail until it is deleted."
+    echo "removed. Drain the node before uninstalling: running containers still need the binary and bundle. Restart k0s/containerd to drop the handler; pods using the RuntimeClass fail until it is deleted."
     exit 0
 fi
 

@@ -84,7 +84,7 @@ bundle with `bundle/get.sh --source` (the commit pinned in `bundle/pin.env`, the
     go build -o v3compat-runtime ./cmd/v3compat-runtime
     sudo install/install.sh          # binary, bundle, config, k0s handler drop-in; native = false
     sudo install/install.sh --native # for nodes labelled x86-64-v3: native = true
-    sudo install/install.sh --uninstall
+    sudo install/install.sh --uninstall   # drain the node first: running containers still need the binary and bundle
 
 `install.sh` always sets `native` in `/etc/v3compat-runtime/config.toml`: written explicitly in a new
 file; in an existing file only that line is rewritten (other keys stay; the config has no tables).
