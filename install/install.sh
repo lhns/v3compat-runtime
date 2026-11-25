@@ -50,6 +50,9 @@ install -m 0755 "$binary" "$BIN.new"
 mv "$BIN.new" "$BIN"
 rm -rf "$BUNDLE_DEST.new"
 cp -a "$bundle" "$BUNDLE_DEST.new"
+# Every translated container execs this: root-owned, not writable by the user who built the bundle.
+chown -R 0:0 "$BUNDLE_DEST.new"
+chmod -R go-w,a+rX "$BUNDLE_DEST.new"
 rm -rf "$BUNDLE_DEST"
 mv "$BUNDLE_DEST.new" "$BUNDLE_DEST"
 
