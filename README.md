@@ -145,6 +145,7 @@ cache_root   = ""                        # translation cache directories, one pe
 CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
 (`bundle/pin.env`), covering translated and native runs, exec, refusal without a bundle, status 87 and the cache mount. The runner has AVX2, where
 the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
+It also runs `test/install.sh` (install, `--native` on an existing config, uninstall).
 
 ## License
 
