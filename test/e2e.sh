@@ -84,16 +84,33 @@ mkbundle nativebroken 0 /probe native
 run c8; check "broken bundle on a native node: runs natively" 0 'libdynamorio mapped=0'
 bundle=$real_bundle; conf 'native = false'
 
+# Statuses of the wrapped process pass through to the container.
+conf 'native = false'
+mkbundle status86 0 /probe refused
+run c9; check "instruction off the audited list: status 86" 86 -
+mkbundle missing 0 /nope
+run c10; check "program not found: status 127" 127 -
+mkbundle noexec 0 /probe-noexec
+cp "$probe" "$b/rootfs/probe-noexec"; chmod 644 "$b/rootfs/probe-noexec"
+run c11; check "program not executable: status 126" 126 -
+# A bundle path with a space makes the launcher itself fail (the wrapper's own bundle check passes).
+rm -rf "$w/bundle 125"; cp -a "$bundle" "$w/bundle 125"
+real_bundle=$bundle; bundle="$w/bundle 125"; conf 'native = false'
+mkbundle launcher 0 /probe translated
+run c12; check "launcher failure: status 125" 125 -
+grep -q "may not contain a space" "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+bundle=$real_bundle; conf 'native = false'
+
 # A bundle without the launcher's library is refused as well, before the container exists.
 rm -rf "$w/bundle-partial"; cp -a "$real_bundle" "$w/bundle-partial"
 rm "$w/bundle-partial/libexec/v3compat/libv3compat.so"
 bundle=$w/bundle-partial; conf 'native = false'
 mkbundle incomplete 0 /probe translated
 status=0
-"$wrapper" --root "$w/state" --log "$w/rlog" --log-format json run --bundle "$b" c9 >"$w/out" 2>"$w/err" || status=$?
+"$wrapper" --root "$w/state" --log "$w/rlog" --log-format json run --bundle "$b" c13 >"$w/out" 2>"$w/err" || status=$?
 check "incomplete bundle on a translating node: refused" 1 -
 grep -q 'bundle incomplete at .*: missing libexec/v3compat/libv3compat.so' "$w/err" || { echo "FAIL no reason on stderr"; fail=1; }
-"$runc" --root "$w/state" state c9 >/dev/null 2>&1 && { echo "FAIL c9 exists"; fail=1; }
+"$runc" --root "$w/state" state c13 >/dev/null 2>&1 && { echo "FAIL c13 exists"; fail=1; }
 bundle=$real_bundle; conf 'native = false'
 
 # The launcher refuses a setuid-root file run by another user: status 87.
