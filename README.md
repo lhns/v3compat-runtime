@@ -92,24 +92,59 @@ file; in an existing file only that line is rewritten (other keys stay; the conf
 Install the handler on every node that may run opted-in pods: a RuntimeClass whose handler is missing fails
 the pod.
 
+### Installer image (DaemonSet)
+
+`ghcr.io/lhns/v3compat-runtime-installer` installs onto the node it runs on, kata-deploy style: run it as a
+DaemonSet with the host root mounted at `HOST_ROOT` (read-write). Tags: `main` (pushes to main) and `vX.Y.Z`
+(the git tag). It runs as root, installs, then sleeps (so the pod stays `Running`; `--once` exits instead).
+It does **not** restart k0s or containerd; the handler loads at the next restart (a reboot rollout). New GHCR
+packages start private: make the package public, or give the cluster a pull secret.
+
+| env | default | meaning |
+| --- | --- | --- |
+| `HOST_ROOT` | `/host` | where the host root is mounted |
+| `NATIVE_NODE` | `false` | `true` or `false` (else: error, nothing installed); `native` in the config |
+| `DR_OPTS` | empty | config `dr_opts`; empty clears it |
+| `CACHE_ROOT` | empty | config `cache_root`, a host path; empty clears it. Created root-owned 0755 if missing (an existing directory is left alone) |
+| `CONTAINERD_CONFIG_VERSION` | `3` | `2` or `3`, the drop-in's containerd config version (see "k0s / containerd") |
+| `MODE` | `install` | `install` or `uninstall` (else: error); argument `--uninstall` is an alias |
+
+Files, under `HOST_ROOT`: `/usr/local/bin/v3compat-runtime`, `/opt/v3compat`, `/etc/v3compat-runtime/config.toml`,
+`/etc/k0s/containerd.d/50-v3compat-runtime.toml`. Paths written into them are host paths. Uninstall removes all
+but the config.
+
+It runs the same `install/install.sh`, which also takes `--root DIR` (prefix for every path written),
+`--dr-opts STR`, `--cache-root PATH` and `--containerd-config 2|3` (an empty string clears the key; values are
+written as escaped TOML strings, newlines refused). Unknown config keys are ignored by the wrapper, so
+`dr_opts` is harmless before the wrapper reads it.
+
+Re-running is idempotent and every file is replaced by rename. An identical bundle is left alone: containers
+bind-mount `/opt/v3compat`, and the pod restarts on every node reboot. A changed bundle is copied to
+`/opt/v3compat.new`, the old tree is renamed to `/opt/v3compat.prev` (replacing an older `.prev`) and the new
+one renamed into place; a rename keeps the old tree valid for containers that already mounted it. So one
+previous version survives until the next change. A reboot rollout is the supported way to upgrade.
+
 **Replacing an old SDE install.** The installer does not touch it. Remove it by hand: run the old
 version's `install.sh --uninstall`, or delete `/usr/local/bin/sde-runtime`, `/opt/sde-bundle`,
 `/etc/sde-runtime` and `/etc/k0s/containerd.d/50-sde-runtime.toml`, and the `sde` RuntimeClass.
 
 ## k0s / containerd
 
-`install/install.sh` writes `/etc/k0s/containerd.d/50-v3compat-runtime.toml` (containerd config v2 syntax):
+`install/install.sh` writes `/etc/k0s/containerd.d/50-v3compat-runtime.toml`. By default it is containerd 2 / config
+`version = 3` syntax with the systemd cgroup driver (`--containerd-config 3`):
 
 ```toml
-version = 2
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.v3compat]
+version = 3
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.v3compat]
   runtime_type = "io.containerd.runc.v2"
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.v3compat.options]
+  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.v3compat.options]
     BinaryName = "/usr/local/bin/v3compat-runtime"
+    SystemdCgroup = true
 ```
 
-With containerd 2 / config `version = 3` the plugin is `io.containerd.cri.v1.runtime` instead of
-`io.containerd.grpc.v1.cri`. Restart k0s or containerd afterwards. Then:
+`--containerd-config 2` writes the config `version = 2` syntax instead (plugin `io.containerd.grpc.v1.cri`, no
+`SystemdCgroup`). Use it when the node's containerd config is version 2.
+Restart k0s or containerd afterwards. Then:
 
 ```yaml
 apiVersion: node.k8s.io/v1
