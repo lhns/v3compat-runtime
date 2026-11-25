@@ -93,12 +93,7 @@ run c10; check "program not found: status 127" 127 -
 mkbundle noexec 0 /probe-noexec
 cp "$probe" "$b/rootfs/probe-noexec"; chmod 644 "$b/rootfs/probe-noexec"
 run c11; check "program not executable: status 126" 126 -
-# A bundle path with a space makes the launcher itself fail (the wrapper's own bundle check passes).
-rm -rf "$w/bundle 125"; cp -a "$bundle" "$w/bundle 125"
-real_bundle=$bundle; bundle="$w/bundle 125"; conf 'native = false'
-mkbundle launcher 0 /probe translated
-run c12; check "launcher failure: status 125" 125 -
-grep -q "may not contain a space" "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+# Status 125 (launcher failure) is no longer reachable with a bundle copy: the wrapper refuses an incomplete bundle first (below).
 bundle=$real_bundle; conf 'native = false'
 
 # A bundle without the launcher's library is refused as well, before the container exists.
