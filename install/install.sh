@@ -111,11 +111,16 @@ install -m 0755 "$binary" "$BIN.new"
 replace "$BIN.new" "$BIN"
 
 mkdir -p "$(dirname "$BUNDLE_DEST")"
-if [ -d "$BUNDLE_DEST" ] && [ "$(fingerprint "$bundle")" = "$(fingerprint "$BUNDLE_DEST")" ]; then
+rm -rf "$BUNDLE_DEST.new"
+cp -a "$bundle" "$BUNDLE_DEST.new"
+# Every translated container execs this: root-owned, not writable by the user who built the bundle.
+chown -R 0:0 "$BUNDLE_DEST.new"
+chmod -R go-w,a+rX "$BUNDLE_DEST.new"
+# Compare after the chown, so a user-owned source still matches the root-owned install.
+if [ -d "$BUNDLE_DEST" ] && [ "$(fingerprint "$BUNDLE_DEST.new")" = "$(fingerprint "$BUNDLE_DEST")" ]; then
+    rm -rf "$BUNDLE_DEST.new"
     echo "bundle unchanged"
 else
-    rm -rf "$BUNDLE_DEST.new"
-    cp -a "$bundle" "$BUNDLE_DEST.new"
     if [ -e "$BUNDLE_DEST" ]; then
         rm -rf "$BUNDLE_DEST.prev"
         mv "$BUNDLE_DEST" "$BUNDLE_DEST.prev"

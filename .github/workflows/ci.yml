@@ -17,7 +17,8 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/v3compat-runtime
-      - run: for f in install/install.sh install/entrypoint.sh bundle/get.sh test/e2e.sh test/installer.sh; do sh -n $f; done
+      - run: for f in install/install.sh install/entrypoint.sh bundle/get.sh test/e2e.sh test/install.sh test/installer.sh; do sh -n $f; done
+      - run: sudo test/install.sh
 
   # The wrapper in front of runc, with the bundle built from the pinned v3compat commit.
   e2e:
