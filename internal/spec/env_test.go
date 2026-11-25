@@ -37,7 +37,6 @@ func TestEnvNonStringFailsClosed(t *testing.T) {
 	for name, f := range map[string]func(map[string]any) error{
 		"remove": func(m map[string]any) error { _, err := removeEnv(m, "A"); return err },
 		"set":    func(m map[string]any) error { return setEnv(m, "A", "1") },
-		"absent": func(m map[string]any) error { return setEnvIfAbsent(m, "A", "1") },
 	} {
 		m := env("B=1", 5)
 		if err := f(m); err == nil {
@@ -60,21 +59,6 @@ func TestSetEnv(t *testing.T) {
 	}
 	m = env("K_X=1")
 	if err := setEnv(m, "K", "v"); err != nil || !reflect.DeepEqual(m["env"], []any{"K_X=1", "K=v"}) {
-		t.Fatal(err, m)
-	}
-}
-
-func TestSetEnvIfAbsent(t *testing.T) {
-	m := env("K=mine", "A=1")
-	if err := setEnvIfAbsent(m, "K", "v"); err != nil || !reflect.DeepEqual(m["env"], []any{"K=mine", "A=1"}) {
-		t.Fatal(err, m)
-	}
-	m = env("K_X=1")
-	if err := setEnvIfAbsent(m, "K", "v"); err != nil || !reflect.DeepEqual(m["env"], []any{"K_X=1", "K=v"}) {
-		t.Fatal(err, m)
-	}
-	m = map[string]any{}
-	if err := setEnvIfAbsent(m, "K", "v"); err != nil || !reflect.DeepEqual(m["env"], []any{"K=v"}) {
 		t.Fatal(err, m)
 	}
 }

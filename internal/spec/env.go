@@ -71,18 +71,3 @@ func setEnv(m map[string]any, key, value string) error {
 	putEnv(m, append(entries, key+"="+value))
 	return nil
 }
-
-// setEnvIfAbsent appends KEY=VALUE unless an entry for key exists.
-func setEnvIfAbsent(m map[string]any, key, value string) error {
-	entries, err := envEntries(m)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if envKey(e) == key {
-			return nil
-		}
-	}
-	putEnv(m, append(entries, key+"="+value))
-	return nil
-}
