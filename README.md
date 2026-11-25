@@ -145,6 +145,9 @@ cache_root   = ""                        # translation cache directories, one pe
 CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
 (`bundle/pin.env`), covering translated and native runs, exec, refusal without a bundle, status 87 and the cache mount. The runner has AVX2, where
 the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
+The e2e job fills the bundle with `bundle/ci-get.sh`: while `bundle/pin.env` has no `V3COMPAT_VERSION` it builds
+`V3COMPAT_COMMIT` from source; once a release is pinned it downloads that release (sha256-verified) and fails unless the
+tag `v<version>` of lhns/v3compat points at `V3COMPAT_COMMIT`. `test/ci-get.sh` tests that choice and check.
 
 ## License
 
