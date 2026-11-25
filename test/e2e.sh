@@ -93,8 +93,12 @@ run c10; check "program not found: status 127" 127 -
 mkbundle noexec 0 /probe-noexec
 cp "$probe" "$b/rootfs/probe-noexec"; chmod 644 "$b/rootfs/probe-noexec"
 run c11; check "program not executable: status 126" 126 -
-# Status 125 (launcher failure) is no longer reachable with a bundle copy: the wrapper refuses an incomplete bundle first (below).
+# A cache path the launcher cannot pass to DynamoRIO makes the launcher itself fail.
 bundle=$real_bundle; conf 'native = false'
+mkbundle launcher 0 /probe translated
+jq '.process.env += ["V3COMPAT_CACHE=/a\"b"]' "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
+run c12; check "launcher failure: status 125" 125 -
+grep -q 'may not contain a quote' "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
 
 # A bundle without the launcher's library is refused as well, before the container exists.
 rm -rf "$w/bundle-partial"; cp -a "$real_bundle" "$w/bundle-partial"
