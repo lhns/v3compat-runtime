@@ -127,6 +127,13 @@ func Refuse(args []string, err error) {
 	}
 }
 
+// bundleFiles are what the launcher loads besides itself (its LIB and DRLIB); without them every
+// process of the container fails with 125.
+var bundleFiles = []string{
+	"libexec/v3compat/libv3compat.so",
+	"libexec/v3compat/dynamorio/lib64/release/libdynamorio.so",
+}
+
 func options(cfg config.Config) spec.Options {
 	return spec.Options{BundlePath: cfg.BundlePath, InitPaths: cfg.InitPaths}
 }
@@ -189,6 +196,11 @@ func create(cmd argv.Cmd, cfg config.Config, d Deps, logf func(string, ...any)) 
 	}
 	if _, err := os.Stat(filepath.Join(cfg.BundlePath, "bin", "v3compat-run")); err != nil {
 		return fmt.Errorf("%s: v3compat bundle missing at %s: %w", id, cfg.BundlePath, err)
+	}
+	for _, rel := range bundleFiles {
+		if _, err := os.Stat(filepath.Join(cfg.BundlePath, filepath.FromSlash(rel))); err != nil {
+			return fmt.Errorf("%s: v3compat bundle incomplete at %s: missing %s", id, cfg.BundlePath, rel)
+		}
 	}
 	o := options(cfg)
 	var image string

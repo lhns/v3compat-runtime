@@ -27,10 +27,11 @@ container created through that handler, `v3compat-runtime`:
    DynamoRIO follows `exec` into child processes.
 
 **Fail-closed on translating nodes** (v3compat ADR 0004, amendment 2026-11-22). If `create`, `run` or `exec`
-cannot set up translation (invalid config, missing bundle, unparsable spec, no process file to rewrite), the
+cannot set up translation (invalid config, missing or incomplete bundle, unparsable spec, no process file to rewrite), the
 wrapper exits 1 without starting the real runtime: run natively there, a v3 program dies with SIGILL or, for
 lzcnt/tzcnt, silently computes bsr/bsf. The reason goes to stderr and to the runtime's `--log` file, where
-containerd reads it for "OCI runtime create failed" in the pod's events. An invalid config refuses on every node,
+containerd reads it for "OCI runtime create failed" in the pod's events. A bundle is complete only with `bin/v3compat-run`,
+`libexec/v3compat/libv3compat.so` and `libexec/v3compat/dynamorio/lib64/release/libdynamorio.so`. An invalid config refuses on every node,
 as the `native` flag cannot be read. A native node (`native = true` and CPUID x86-64-v3) never reads the bundle or
 spec, so nothing there can fail. Every other subcommand (`state`, `start`, `kill`, `delete`, ...) passes through
 unchanged, so existing containers can always be managed. Logs go to syslog (`v3compat-runtime`) and
