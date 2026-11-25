@@ -3,6 +3,7 @@
 //   native       the same results and DynamoRIO is not mapped
 //   cache-ro     PATH is a directory on a read-only mount (the translation cache)
 //   cache-none   PATH does not exist
+//   env          print NAME (the second argument) from the environment, "(unset)" if absent
 //   wait         sleep until killed (a long-running container to exec into)
 // Without a mode only the results are checked. Exit 0 on success.
 #include <errno.h>
@@ -10,6 +11,7 @@
 #include <immintrin.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -45,6 +47,11 @@ static int results(void) {
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "";
     if (!strcmp(mode, "wait")) for (;;) pause();
+    if (!strcmp(mode, "env")) {
+        const char *name = argc > 2 ? argv[2] : "", *v = getenv(name);
+        printf("%s=%s\n", name, v ? v : "(unset)");
+        return 0;
+    }
     if (!strcmp(mode, "cache-ro") || !strcmp(mode, "cache-none")) {
         const char *path = argc > 2 ? argv[2] : "";
         struct stat st;

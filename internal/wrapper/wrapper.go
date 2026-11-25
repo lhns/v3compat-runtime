@@ -128,7 +128,13 @@ func Refuse(args []string, err error) {
 }
 
 func options(cfg config.Config) spec.Options {
-	return spec.Options{BundlePath: cfg.BundlePath, InitPaths: cfg.InitPaths}
+	return spec.Options{BundlePath: cfg.BundlePath, InitPaths: cfg.InitPaths, DROpts: cfg.DROpts}
+}
+
+func logRemoved(logf func(string, ...any), who string, r spec.Result) {
+	if len(r.Removed) > 0 {
+		logf("info: %s: removed %s from the container env", who, strings.Join(r.Removed, ", "))
+	}
 }
 
 // translate decides whether containers run under the launcher. Native needs the node's opt-in
@@ -193,15 +199,16 @@ func create(cmd argv.Cmd, cfg config.Config, d Deps, logf func(string, ...any)) 
 	o := options(cfg)
 	var image string
 	o.CacheDir, image = cacheDir(cfg, cfgPath)
-	changed, err := spec.RewriteConfig(cfgPath, o)
+	res, err := spec.RewriteConfig(cfgPath, o)
 	switch {
 	case err != nil:
 		return fmt.Errorf("%s: %w", id, err)
-	case changed && cfg.CacheRoot != "":
+	case res.Wrapped && cfg.CacheRoot != "":
 		logf("info: %s: wrapped with v3compat-run, bundle %s, image %q, cache %q (empty: none mounted)", id, cfg.BundlePath, image, o.CacheDir)
-	case changed:
+	case res.Wrapped:
 		logf("info: %s: wrapped with v3compat-run, bundle %s", id, cfg.BundlePath)
 	}
+	logRemoved(logf, id, res)
 	return nil
 }
 
@@ -229,12 +236,13 @@ func execCmd(cmd argv.Cmd, cfg config.Config, d Deps, logf func(string, ...any))
 	if cmd.Process == "" {
 		return fmt.Errorf("exec %s: no --process file (inline args) to wrap", id)
 	}
-	changed, err := spec.RewriteProcess(cmd.Process, options(cfg))
+	res, err := spec.RewriteProcess(cmd.Process, options(cfg))
 	switch {
 	case err != nil:
 		return fmt.Errorf("exec %s: %w", id, err)
-	case changed:
+	case res.Wrapped:
 		logf("info: exec %s: wrapped with v3compat-run", id)
 	}
+	logRemoved(logf, "exec "+id, res)
 	return nil
 }
