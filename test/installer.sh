@@ -55,9 +55,6 @@ in_img "fresh: bundle not group/other-writable" "[ -z \"\$(find $DEST -perm /022
 in_img "fresh: CACHE_ROOT is root 0755" "[ \"\$(stat -c '%u %a' $H/var/cache/v3c)\" = '0 755' ]"
 in_img "fresh: no .prev" "[ ! -e $DEST.prev ]"
 
-# The real TOML must decode to the original string: check with the Go loader's parser is done in
-# unit tests; here compare the raw line only.
-
 # Same content again: bundle untouched.
 ino=$(sh_in "stat -c %i $DEST")
 check "second run exits 0" inst NATIVE_NODE=false 'DR_OPTS=-x "a b" \c' CACHE_ROOT=/var/cache/v3c -- --once
