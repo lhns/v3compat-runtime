@@ -33,6 +33,10 @@ func newEnv(t *testing.T) *env {
 	must(os.MkdirAll(filepath.Join(e.v3c, "bin"), 0o755))
 	must(os.MkdirAll(e.bundle, 0o755))
 	must(os.WriteFile(filepath.Join(e.v3c, "bin", "v3compat-run"), nil, 0o755))
+	for _, rel := range bundleFiles {
+		must(os.MkdirAll(filepath.Dir(filepath.Join(e.v3c, filepath.FromSlash(rel))), 0o755))
+		must(os.WriteFile(filepath.Join(e.v3c, filepath.FromSlash(rel)), nil, 0o644))
+	}
 	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte(appCfg), 0o644))
 	e.config(fmt.Sprintf("real_runtime = %q\nbundle_path = %q\nlog_file = \"\"\n", "/real/runc", filepath.ToSlash(e.v3c)))
 	return e
@@ -352,6 +356,29 @@ func TestExecNative(t *testing.T) {
 	e.v3 = true
 	if got := e.execFixture(true); !strings.Contains(got, "v3compat-run") {
 		t.Fatal(got)
+	}
+}
+
+func TestIncompleteBundleRefuses(t *testing.T) {
+	for _, rel := range bundleFiles {
+		e := newEnv(t)
+		must(os.Remove(filepath.Join(e.v3c, filepath.FromSlash(rel))))
+		e.prepare("create", "-b", e.bundle, "c1")
+		want := "c1: v3compat bundle incomplete at " + filepath.ToSlash(e.v3c) + ": missing " + rel
+		if e.err == nil || e.err.Error() != want || e.cfgBytes() != appCfg || !strings.Contains(e.lastLog(), "refused") {
+			t.Errorf("%s: %v %v", rel, e.err, e.logs)
+		}
+	}
+}
+
+// A native node never looks at the bundle.
+func TestNativeNodeIgnoresIncompleteBundle(t *testing.T) {
+	e := newEnv(t)
+	e.v3 = true
+	e.nativeConf("native = true\n")
+	must(os.Remove(filepath.Join(e.v3c, filepath.FromSlash(bundleFiles[0]))))
+	if e.prepare("create", "-b", e.bundle, "c1"); e.err != nil {
+		t.Fatal(e.err)
 	}
 }
 

@@ -114,12 +114,23 @@ run c10; check "program not found: status 127" 127 -
 mkbundle noexec 0 /probe-noexec
 cp "$probe" "$b/rootfs/probe-noexec"; chmod 644 "$b/rootfs/probe-noexec"
 run c11; check "program not executable: status 126" 126 -
-# A bundle copy without the client library makes the launcher itself fail.
-rm -rf "$w/bundle125"; cp -a "$bundle" "$w/bundle125"; rm -f "$w/bundle125/libexec/v3compat/libv3compat.so"
-real_bundle=$bundle; bundle=$w/bundle125; conf 'native = false'
+# A cache path the launcher cannot pass to DynamoRIO makes the launcher itself fail.
+bundle=$real_bundle; conf 'native = false'
 mkbundle launcher 0 /probe translated
+jq '.process.env += ["V3COMPAT_CACHE=/a\"b"]' "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
 run c12; check "launcher failure: status 125" 125 -
-grep -q 'cannot read' "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+grep -q 'may not contain a quote' "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+
+# A bundle without the launcher's library is refused as well, before the container exists.
+rm -rf "$w/bundle-partial"; cp -a "$real_bundle" "$w/bundle-partial"
+rm "$w/bundle-partial/libexec/v3compat/libv3compat.so"
+bundle=$w/bundle-partial; conf 'native = false'
+mkbundle incomplete 0 /probe translated
+status=0
+"$wrapper" --root "$w/state" --log "$w/rlog" --log-format json run --bundle "$b" c13 >"$w/out" 2>"$w/err" || status=$?
+check "incomplete bundle on a translating node: refused" 1 -
+grep -q 'bundle incomplete at .*: missing libexec/v3compat/libv3compat.so' "$w/err" || { echo "FAIL no reason on stderr"; fail=1; }
+"$runc" --root "$w/state" state c13 >/dev/null 2>&1 && { echo "FAIL c13 exists"; fail=1; }
 bundle=$real_bundle; conf 'native = false'
 
 # The launcher refuses a setuid-root file run by another user: status 87.

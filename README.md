@@ -27,10 +27,11 @@ container created through that handler, `v3compat-runtime`:
    DynamoRIO follows `exec` into child processes.
 
 **Fail-closed on translating nodes** (v3compat ADR 0004, amendment 2026-11-22). If `create`, `run` or `exec`
-cannot set up translation (invalid config, missing bundle, unparsable spec, no process file to rewrite), the
+cannot set up translation (invalid config, missing or incomplete bundle, unparsable spec, no process file to rewrite), the
 wrapper exits 1 without starting the real runtime: run natively there, a v3 program dies with SIGILL or, for
 lzcnt/tzcnt, silently computes bsr/bsf. The reason goes to stderr and to the runtime's `--log` file, where
-containerd reads it for "OCI runtime create failed" in the pod's events. An invalid config refuses on every node,
+containerd reads it for "OCI runtime create failed" in the pod's events. A bundle is complete only with `bin/v3compat-run`,
+`libexec/v3compat/libv3compat.so` and `libexec/v3compat/dynamorio/lib64/release/libdynamorio.so`. An invalid config refuses on every node,
 as the `native` flag cannot be read. A native node (`native = true` and CPUID x86-64-v3) never reads the bundle or
 spec, so nothing there can fail. Every other subcommand (`state`, `start`, `kill`, `delete`, ...) passes through
 unchanged, so existing containers can always be managed. Logs go to syslog (`v3compat-runtime`) and
@@ -193,7 +194,7 @@ dr_opts      = ""                        # set as V3COMPAT_DR_OPTS (DynamoRIO op
     GOOS=linux GOARCH=amd64 go build ./cmd/v3compat-runtime
 
 CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
-(`bundle/pin.env`), covering translated and native runs, the env policy, exec, refusal without a bundle, statuses 86, 87, 125, 126 and 127 and the cache mount (also its ownership check). The runner has AVX2, where
+(`bundle/pin.env`), covering translated and native runs, the env policy, exec, refusal without a complete bundle, statuses 86, 87, 125, 126 and 127 and the cache mount (also its ownership check). The runner has AVX2, where
 the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
 The e2e job fills the bundle with `bundle/ci-get.sh`: while `bundle/pin.env` has no `V3COMPAT_VERSION` it builds
 `V3COMPAT_COMMIT` from source; once a release is pinned it downloads that release (sha256-verified) and fails unless the
