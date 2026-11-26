@@ -352,3 +352,80 @@ func TestExecNative(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func (e *env) procEnvOf(path string, nested bool) []any {
+	b, _ := os.ReadFile(path)
+	var m map[string]any
+	must(json.Unmarshal(b, &m))
+	if nested {
+		m = m["process"].(map[string]any)
+	}
+	l, _ := m["env"].([]any)
+	return l
+}
+
+func TestCreateDropsNativeAndAuditAndSetsDROpts(t *testing.T) {
+	e := newEnv(t)
+	e.nativeConf("dr_opts = \"-no_hw_cache_consistency\"\n")
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"),
+		[]byte(`{"process":{"args":["/app"],"env":["V3COMPAT_NATIVE=1","V3COMPAT_AUDIT=1","V3COMPAT_DR_OPTS=-x","V3COMPAT_CACHE=/c"]}}`), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	got := fmt.Sprint(e.procEnvOf(filepath.Join(e.bundle, "config.json"), true))
+	if got != "[V3COMPAT_CACHE=/c V3COMPAT_DR_OPTS=-no_hw_cache_consistency]" {
+		t.Fatal(got)
+	}
+	if !strings.Contains(strings.Join(e.logs, "\n"), "info: c1: removed V3COMPAT_NATIVE, V3COMPAT_AUDIT from the container env") {
+		t.Fatal(e.logs)
+	}
+}
+
+func TestCreateEnvPolicyQuietWhenNothingToRemove(t *testing.T) {
+	e := newEnv(t)
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"),
+		[]byte(`{"process":{"args":["/app"],"env":["V3COMPAT_DR_OPTS=-x"]}}`), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	if got := fmt.Sprint(e.procEnvOf(filepath.Join(e.bundle, "config.json"), true)); got != "[V3COMPAT_DR_OPTS=-x]" {
+		t.Fatal(got) // dr_opts unset: the container's own value passes through
+	}
+	if strings.Contains(strings.Join(e.logs, "\n"), "removed") {
+		t.Fatal(e.logs)
+	}
+}
+
+func TestCreateRefusesNonStringEnv(t *testing.T) {
+	e := newEnv(t)
+	cfg := `{"process":{"args":["/app"],"env":[1]}}`
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte(cfg), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	if e.err == nil || e.cfgBytes() != cfg {
+		t.Fatal(e.err, e.cfgBytes())
+	}
+}
+
+func TestNativeNodeKeepsEnv(t *testing.T) {
+	e := newEnv(t)
+	e.v3 = true
+	e.nativeConf("native = true\ndr_opts = \"-x\"\n")
+	cfg := `{"process":{"args":["/app"],"env":["V3COMPAT_NATIVE=1"]}}`
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte(cfg), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	if e.cfgBytes() != cfg {
+		t.Fatal(e.cfgBytes())
+	}
+}
+
+func TestExecEnvPolicy(t *testing.T) {
+	e := newEnv(t)
+	e.nativeConf("dr_opts = \"-x\"\n")
+	e.prepare("create", "-b", e.bundle, "c1")
+	proc := filepath.Join(e.dir, "process.json")
+	must(os.WriteFile(proc, []byte(`{"args":["sh"],"env":["PATH=/","V3COMPAT_NATIVE=1"]}`), 0o644))
+	e.state = func(string, []string, string) (string, error) { return e.bundle, nil }
+	e.prepare("exec", "--process", proc, "c1")
+	if got := fmt.Sprint(e.procEnvOf(proc, false)); got != "[PATH=/ V3COMPAT_DR_OPTS=-x]" {
+		t.Fatal(got)
+	}
+	if !strings.Contains(strings.Join(e.logs, "\n"), "removed V3COMPAT_NATIVE from the container env") {
+		t.Fatal(e.logs)
+	}
+}

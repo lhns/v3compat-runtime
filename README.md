@@ -36,6 +36,11 @@ spec, so nothing there can fail. Every other subcommand (`state`, `start`, `kill
 unchanged, so existing containers can always be managed. Logs go to syslog (`v3compat-runtime`) and
 `/var/log/v3compat-runtime.log`; stdout is never written.
 
+**Container environment.** On `create`, `run` and `exec` of a wrapped container the wrapper removes
+`V3COMPAT_NATIVE` and `V3COMPAT_AUDIT` from the process env and logs it: a pod must not opt itself out of
+translation on a translating node (ADR 0004, amendment 2026-11-22), and audit mode runs off-list forms natively.
+`dr_opts`, if set, replaces the container's `V3COMPAT_DR_OPTS`. Every other `V3COMPAT_*` variable passes through.
+
 ### Translation cache mount
 
 If `cache_root` is set and the image reference (annotation `io.kubernetes.cri.image-name`) ends in
@@ -135,6 +140,7 @@ init_paths   = ["/sbin/docker-init", "/run/podman-init", "/dev/init"]
 log_file     = "/var/log/v3compat-runtime.log"
 native       = false                     # true: run unwrapped if CPUID shows x86-64-v3 (install.sh --native)
 cache_root   = ""                        # translation cache directories, one per image digest; empty: off
+dr_opts      = ""                        # set as V3COMPAT_DR_OPTS (DynamoRIO options) in every wrapped container; empty: the container's own
 ```
 
 ## Development
@@ -143,7 +149,7 @@ cache_root   = ""                        # translation cache directories, one pe
     GOOS=linux GOARCH=amd64 go build ./cmd/v3compat-runtime
 
 CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
-(`bundle/pin.env`), covering translated and native runs, exec, refusal without a bundle, statuses 86, 87, 125, 126 and 127 and the cache mount. The runner has AVX2, where
+(`bundle/pin.env`), covering translated and native runs, the env policy, exec, refusal without a bundle, statuses 86, 87, 125, 126 and 127 and the cache mount. The runner has AVX2, where
 the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
 It also runs `test/install.sh` (install, `--native` on an existing config, uninstall).
 

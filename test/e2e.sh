@@ -30,6 +30,12 @@ mkbundle() {
         "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
 }
 
+# addenv ENTRY...: append entries to the process env of the bundle in $b
+addenv() {
+    e=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+    jq --argjson e "$e" '.process.env += $e' "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
+}
+
 # check NAME WANT_STATUS WANT_OUT_REGEX ("-": any output) ; reads $status and the out/err files
 check() {
     if [ "$status" = "$2" ] && { [ "$3" = - ] || grep -Eq "$3" "$w/out"; }; then echo "ok   $1"; else
@@ -50,6 +56,20 @@ mkbundle translated 0 /probe translated
 run c1; check "translated: DynamoRIO mapped, results right" 0 'libdynamorio mapped=1'
 grep -q 'wrapped with v3compat-run' "$w/log" || { echo "FAIL no wrap log line"; fail=1; }
 
+# A pod must not opt itself out of translation: V3COMPAT_NATIVE and V3COMPAT_AUDIT are dropped.
+mkbundle envpolicy 0 /probe translated
+addenv V3COMPAT_NATIVE=1 V3COMPAT_AUDIT=1
+run c1e; check "container env V3COMPAT_NATIVE=1: still translated" 0 'libdynamorio mapped=1'
+grep -q 'removed V3COMPAT_NATIVE, V3COMPAT_AUDIT from the container env' "$w/log" || { echo "FAIL no env removal log line"; fail=1; }
+
+# dr_opts overrides the container's own V3COMPAT_DR_OPTS; the launcher puts it into DYNAMORIO_OPTIONS.
+conf 'dr_opts = "-msgbox_mask 0"'
+mkbundle dropts 0 /probe env DYNAMORIO_OPTIONS
+addenv V3COMPAT_DR_OPTS=-bogus_option
+run c1d; check "dr_opts reaches DynamoRIO" 0 'DYNAMORIO_OPTIONS=.*-msgbox_mask 0'
+grep -q bogus_option "$w/out" && { echo "FAIL container V3COMPAT_DR_OPTS not overridden"; fail=1; }
+conf 'native = false'
+
 conf 'native = true'
 mkbundle native 0 /probe native
 run c2; check "native=true on a v3 CPU: no DynamoRIO" 0 'libdynamorio mapped=0'
@@ -61,11 +81,12 @@ mkbundle execc 0 /probe wait
 "$wrapper" --root "$w/state" create --bundle "$b" c3 >/dev/null 2>&1
 "$wrapper" --root "$w/state" start c3
 cat > "$w/process.json" <<'JSON'
-{"terminal":false,"user":{"uid":0,"gid":0},"cwd":"/","env":["PATH=/"],"args":["/probe","translated"]}
+{"terminal":false,"user":{"uid":0,"gid":0},"cwd":"/","env":["PATH=/","V3COMPAT_NATIVE=1"],"args":["/probe","translated"]}
 JSON
 status=0
 "$wrapper" --root "$w/state" exec --process "$w/process.json" c3 >"$w/out" 2>"$w/err" || status=$?
 check "exec into a wrapped container is translated" 0 'libdynamorio mapped=1'
+grep -q 'exec c3: removed V3COMPAT_NATIVE from the container env' "$w/log" || { echo "FAIL no exec env removal log line"; fail=1; }
 "$runc" --root "$w/state" kill c3 KILL || true
 sleep 1; "$runc" --root "$w/state" delete -f c3 || true
 
