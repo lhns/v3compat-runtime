@@ -1,7 +1,10 @@
 name: ci
+permissions:
+  contents: read
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 jobs:
   test:
@@ -15,7 +18,7 @@ jobs:
       - run: go test ./...
       - run: for f in bundle/ci-get.sh test/ci-get.sh; do sh -n $f; done && test/ci-get.sh
       - run: GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/v3compat-runtime
-      - run: for f in install/install.sh bundle/get.sh test/e2e.sh test/install.sh; do sh -n $f; done
+      - run: for f in install/install.sh install/entrypoint.sh bundle/get.sh test/e2e.sh test/install.sh test/installer.sh; do sh -n $f; done
       - run: sudo test/install.sh
 
   # The wrapper in front of runc, with the bundle built from the pinned v3compat commit.
@@ -38,6 +41,37 @@ jobs:
           sudo apt-get install -y cmake g++ git patch zlib1g-dev jq
           command -v runc >/dev/null || sudo apt-get install -y runc
       - run: bundle/ci-get.sh
-      - run: go build -o v3compat-runtime ./cmd/v3compat-runtime
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o v3compat-runtime ./cmd/v3compat-runtime
       - run: make -C test/probe
       - run: sudo test/e2e.sh ./v3compat-runtime bundle/out/v3compat test/probe/probe
+      # The image ships exactly what the tests above ran against (modes kept by tar).
+      - run: tar -czf installer-input.tgz v3compat-runtime bundle/out/v3compat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-input
+          path: installer-input.tgz
+          retention-days: 7
+
+  # Installer image for the DaemonSet; pushed from main and v* tags only.
+  image:
+    needs: [test, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/lhns/v3compat-runtime-installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-input
+      - run: tar -xzf installer-input.tgz
+      - run: docker build -t "$IMAGE:ci" .
+      - run: test/installer.sh "$IMAGE:ci"
+      - name: Push
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:ci" "$IMAGE:$GITHUB_REF_NAME"
+          docker push "$IMAGE:$GITHUB_REF_NAME"

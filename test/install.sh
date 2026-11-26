@@ -55,7 +55,9 @@ check "fresh: drop-in binary" has "$DROPIN" 'BinaryName = "/usr/local/bin/v3comp
 check "fresh: drop-in handler" has "$DROPIN" 'runtimes.v3compat]'
 
 echo 'cache_root = "/x"' >> "$CONF"
+ino=$(stat -c %i "$DEST")
 check "--native exits 0" run --native
+check "unchanged user-owned source: bundle untouched" test "$(stat -c %i "$DEST")" = "$ino" -a ! -e "$DEST.prev"
 check "--native: one native line" one_native
 check "--native: native = true" has "$CONF" "native = true"
 check "--native: other keys kept" has "$CONF" 'cache_root = "/x"'
