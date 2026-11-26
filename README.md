@@ -130,8 +130,7 @@ but the config.
 
 It runs the same `install/install.sh`, which also takes `--root DIR` (prefix for every path written),
 `--dr-opts STR`, `--cache-root PATH` and `--containerd-config 2|3` (an empty string clears the key; values are
-written as escaped TOML strings, newlines refused). Unknown config keys are ignored by the wrapper, so
-`dr_opts` is harmless before the wrapper reads it.
+written as escaped TOML strings, newlines refused).
 
 Re-running is idempotent and every file is replaced by rename. An identical bundle is left alone: containers
 bind-mount `/opt/v3compat`, and the pod restarts on every node reboot. A changed bundle is copied to
