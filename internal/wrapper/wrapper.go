@@ -27,6 +27,8 @@ type Deps struct {
 	// State returns the bundle directory of a container (runtime `state`).
 	State func(real string, global []string, id string) (string, error)
 	Getwd func() (string, error)
+	// TrustedDir accepts a cache directory: a real directory owned by root and not writable by group or others.
+	TrustedDir func(path string) error
 }
 
 // Defaults fills unset dependencies with the real ones (Logf and HostV3 stay caller's job).
@@ -39,6 +41,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.Logf == nil {
 		d.Logf = func(string, string, ...any) {}
+	}
+	if d.TrustedDir == nil {
+		d.TrustedDir = trustedDir
 	}
 	if d.HostV3 == nil {
 		d.HostV3 = func() bool { return false }
@@ -135,7 +140,13 @@ var bundleFiles = []string{
 }
 
 func options(cfg config.Config) spec.Options {
-	return spec.Options{BundlePath: cfg.BundlePath, InitPaths: cfg.InitPaths}
+	return spec.Options{BundlePath: cfg.BundlePath, InitPaths: cfg.InitPaths, DROpts: cfg.DROpts}
+}
+
+func logRemoved(logf func(string, ...any), who string, r spec.Result) {
+	if len(r.Removed) > 0 {
+		logf("info: %s: removed %s from the container env", who, strings.Join(r.Removed, ", "))
+	}
 }
 
 // translate decides whether containers run under the launcher. Native needs the node's opt-in
@@ -152,7 +163,9 @@ func translate(cfg config.Config, d Deps) (wrap, vetoed bool) {
 }
 
 // cacheDir returns the host directory of the image's translation cache, or "" with the image name.
-func cacheDir(cfg config.Config, cfgPath string) (dir, image string) {
+// A cache that exists but is not trusted (see Deps.TrustedDir) is not mounted and is warned about;
+// a missing one is not an error: the image translates fresh.
+func cacheDir(id string, cfg config.Config, cfgPath string, d Deps, logf func(string, ...any)) (dir, image string) {
 	if cfg.CacheRoot == "" {
 		return "", ""
 	}
@@ -165,8 +178,14 @@ func cacheDir(cfg config.Config, cfgPath string) (dir, image string) {
 		return "", image
 	}
 	dir = filepath.Join(cfg.CacheRoot, "sha256-"+hex)
-	if st, err := os.Lstat(dir); err != nil || !st.IsDir() {
+	if _, err := os.Lstat(dir); err != nil {
 		return "", image
+	}
+	for _, p := range []string{cfg.CacheRoot, dir} {
+		if err := d.TrustedDir(p); err != nil {
+			logf("warn: %s: translation cache not mounted: %v", id, err)
+			return "", image
+		}
 	}
 	return dir, image
 }
@@ -204,16 +223,17 @@ func create(cmd argv.Cmd, cfg config.Config, d Deps, logf func(string, ...any)) 
 	}
 	o := options(cfg)
 	var image string
-	o.CacheDir, image = cacheDir(cfg, cfgPath)
-	changed, err := spec.RewriteConfig(cfgPath, o)
+	o.CacheDir, image = cacheDir(id, cfg, cfgPath, d, logf)
+	res, err := spec.RewriteConfig(cfgPath, o)
 	switch {
 	case err != nil:
 		return fmt.Errorf("%s: %w", id, err)
-	case changed && cfg.CacheRoot != "":
+	case res.Wrapped && cfg.CacheRoot != "":
 		logf("info: %s: wrapped with v3compat-run, bundle %s, image %q, cache %q (empty: none mounted)", id, cfg.BundlePath, image, o.CacheDir)
-	case changed:
+	case res.Wrapped:
 		logf("info: %s: wrapped with v3compat-run, bundle %s", id, cfg.BundlePath)
 	}
+	logRemoved(logf, id, res)
 	return nil
 }
 
@@ -241,12 +261,19 @@ func execCmd(cmd argv.Cmd, cfg config.Config, d Deps, logf func(string, ...any))
 	if cmd.Process == "" {
 		return fmt.Errorf("exec %s: no --process file (inline args) to wrap", id)
 	}
-	changed, err := spec.RewriteProcess(cmd.Process, options(cfg))
+	cached, err := spec.HasCache(filepath.Join(bundle, "config.json"))
+	if err != nil {
+		return fmt.Errorf("exec %s: %w", id, err)
+	}
+	o := options(cfg)
+	o.ExecCache = cached
+	res, err := spec.RewriteProcess(cmd.Process, o)
 	switch {
 	case err != nil:
 		return fmt.Errorf("exec %s: %w", id, err)
-	case changed:
+	case res.Wrapped:
 		logf("info: exec %s: wrapped with v3compat-run", id)
 	}
+	logRemoved(logf, "exec "+id, res)
 	return nil
 }
