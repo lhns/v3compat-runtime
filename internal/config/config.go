@@ -20,6 +20,8 @@ type Config struct {
 	Native bool `toml:"native"`
 	// CacheRoot holds one directory per image digest (sha256-<hex>); empty disables the cache mount.
 	CacheRoot string `toml:"cache_root"`
+	// DROpts is set as V3COMPAT_DR_OPTS in every wrapped container, over the container's own value.
+	DROpts string `toml:"dr_opts"`
 }
 
 func Defaults() Config {

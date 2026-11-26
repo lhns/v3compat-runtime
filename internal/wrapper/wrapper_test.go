@@ -21,7 +21,8 @@ type env struct {
 	logs   []string
 	v3     bool
 	state  func(string, []string, string) (string, error)
-	err    error // of the last prepare
+	err    error              // of the last prepare
+	trust  func(string) error // Deps.TrustedDir override
 }
 
 const appCfg = `{"process":{"args":["/app"]},"annotations":{"io.kubernetes.cri.container-type":"container"}}`
@@ -32,6 +33,10 @@ func newEnv(t *testing.T) *env {
 	must(os.MkdirAll(filepath.Join(e.v3c, "bin"), 0o755))
 	must(os.MkdirAll(e.bundle, 0o755))
 	must(os.WriteFile(filepath.Join(e.v3c, "bin", "v3compat-run"), nil, 0o755))
+	for _, rel := range bundleFiles {
+		must(os.MkdirAll(filepath.Dir(filepath.Join(e.v3c, filepath.FromSlash(rel))), 0o755))
+		must(os.WriteFile(filepath.Join(e.v3c, filepath.FromSlash(rel)), nil, 0o644))
+	}
 	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte(appCfg), 0o644))
 	e.config(fmt.Sprintf("real_runtime = %q\nbundle_path = %q\nlog_file = \"\"\n", "/real/runc", filepath.ToSlash(e.v3c)))
 	return e
@@ -52,6 +57,7 @@ func (e *env) prepare(args ...string) string {
 		Logf:       func(_, f string, a ...any) { e.logs = append(e.logs, fmt.Sprintf(f, a...)) },
 		State:      e.state,
 		Getwd:      func() (string, error) { return e.bundle, nil },
+		TrustedDir: e.trusted,
 	})
 	e.err = err
 	if err != nil && real != "" {
@@ -350,5 +356,105 @@ func TestExecNative(t *testing.T) {
 	e.v3 = true
 	if got := e.execFixture(true); !strings.Contains(got, "v3compat-run") {
 		t.Fatal(got)
+	}
+}
+
+func TestIncompleteBundleRefuses(t *testing.T) {
+	for _, rel := range bundleFiles {
+		e := newEnv(t)
+		must(os.Remove(filepath.Join(e.v3c, filepath.FromSlash(rel))))
+		e.prepare("create", "-b", e.bundle, "c1")
+		want := "c1: v3compat bundle incomplete at " + filepath.ToSlash(e.v3c) + ": missing " + rel
+		if e.err == nil || e.err.Error() != want || e.cfgBytes() != appCfg || !strings.Contains(e.lastLog(), "refused") {
+			t.Errorf("%s: %v %v", rel, e.err, e.logs)
+		}
+	}
+}
+
+// A native node never looks at the bundle.
+func TestNativeNodeIgnoresIncompleteBundle(t *testing.T) {
+	e := newEnv(t)
+	e.v3 = true
+	e.nativeConf("native = true\n")
+	must(os.Remove(filepath.Join(e.v3c, filepath.FromSlash(bundleFiles[0]))))
+	if e.prepare("create", "-b", e.bundle, "c1"); e.err != nil {
+		t.Fatal(e.err)
+	}
+}
+
+func (e *env) procEnvOf(path string, nested bool) []any {
+	b, _ := os.ReadFile(path)
+	var m map[string]any
+	must(json.Unmarshal(b, &m))
+	if nested {
+		m = m["process"].(map[string]any)
+	}
+	l, _ := m["env"].([]any)
+	return l
+}
+
+func TestCreateDropsNativeAndAuditAndSetsDROpts(t *testing.T) {
+	e := newEnv(t)
+	e.nativeConf("dr_opts = \"-no_hw_cache_consistency\"\n")
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"),
+		[]byte(`{"process":{"args":["/app"],"env":["V3COMPAT_NATIVE=1","V3COMPAT_AUDIT=1","V3COMPAT_DR_OPTS=-x","V3COMPAT_CACHE=/c"]}}`), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	got := fmt.Sprint(e.procEnvOf(filepath.Join(e.bundle, "config.json"), true))
+	if got != "[V3COMPAT_CACHE=/c V3COMPAT_DR_OPTS=-no_hw_cache_consistency]" {
+		t.Fatal(got)
+	}
+	if !strings.Contains(strings.Join(e.logs, "\n"), "info: c1: removed V3COMPAT_NATIVE, V3COMPAT_AUDIT from the container env") {
+		t.Fatal(e.logs)
+	}
+}
+
+func TestCreateEnvPolicyQuietWhenNothingToRemove(t *testing.T) {
+	e := newEnv(t)
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"),
+		[]byte(`{"process":{"args":["/app"],"env":["V3COMPAT_DR_OPTS=-x"]}}`), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	if got := fmt.Sprint(e.procEnvOf(filepath.Join(e.bundle, "config.json"), true)); got != "[V3COMPAT_DR_OPTS=-x]" {
+		t.Fatal(got) // dr_opts unset: the container's own value passes through
+	}
+	if strings.Contains(strings.Join(e.logs, "\n"), "removed") {
+		t.Fatal(e.logs)
+	}
+}
+
+func TestCreateRefusesNonStringEnv(t *testing.T) {
+	e := newEnv(t)
+	cfg := `{"process":{"args":["/app"],"env":[1]}}`
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte(cfg), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	if e.err == nil || e.cfgBytes() != cfg {
+		t.Fatal(e.err, e.cfgBytes())
+	}
+}
+
+func TestNativeNodeKeepsEnv(t *testing.T) {
+	e := newEnv(t)
+	e.v3 = true
+	e.nativeConf("native = true\ndr_opts = \"-x\"\n")
+	cfg := `{"process":{"args":["/app"],"env":["V3COMPAT_NATIVE=1"]}}`
+	must(os.WriteFile(filepath.Join(e.bundle, "config.json"), []byte(cfg), 0o644))
+	e.prepare("create", "-b", e.bundle, "c1")
+	if e.cfgBytes() != cfg {
+		t.Fatal(e.cfgBytes())
+	}
+}
+
+func TestExecEnvPolicy(t *testing.T) {
+	e := newEnv(t)
+	e.nativeConf("dr_opts = \"-x\"\n")
+	e.prepare("create", "-b", e.bundle, "c1")
+	proc := filepath.Join(e.dir, "process.json")
+	must(os.WriteFile(proc, []byte(`{"args":["sh"],"env":["PATH=/","V3COMPAT_NATIVE=1"]}`), 0o644))
+	e.state = func(string, []string, string) (string, error) { return e.bundle, nil }
+	e.prepare("exec", "--process", proc, "c1")
+	if got := fmt.Sprint(e.procEnvOf(proc, false)); got != "[PATH=/ V3COMPAT_DR_OPTS=-x]" {
+		t.Fatal(got)
+	}
+	if !strings.Contains(strings.Join(e.logs, "\n"), "removed V3COMPAT_NATIVE from the container env") {
+		t.Fatal(e.logs)
 	}
 }

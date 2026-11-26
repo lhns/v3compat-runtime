@@ -56,9 +56,9 @@ func read(t *testing.T, p string) map[string]any {
 
 func TestRewriteConfigPreservesAndIsIdempotent(t *testing.T) {
 	p := write(t, cfg)
-	ch, err := RewriteConfig(p, opts)
-	if err != nil || !ch {
-		t.Fatal(ch, err)
+	res, err := RewriteConfig(p, opts)
+	if err != nil || !res.Wrapped {
+		t.Fatal(res, err)
 	}
 	b1, _ := os.ReadFile(p)
 	m := read(t, p)
@@ -91,9 +91,9 @@ func TestRewriteConfigPreservesAndIsIdempotent(t *testing.T) {
 	if st, _ := os.Stat(p); filepath.Separator == '/' && st.Mode().Perm() != 0o640 {
 		t.Fatalf("mode %v", st.Mode())
 	}
-	ch, err = RewriteConfig(p, opts)
+	res, err = RewriteConfig(p, opts)
 	b2, _ := os.ReadFile(p)
-	if err != nil || ch || string(b1) != string(b2) {
+	if err != nil || res.Wrapped || string(b1) != string(b2) {
 		t.Fatal("not idempotent")
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(p)); len(entries) != 1 {
@@ -104,14 +104,14 @@ func TestRewriteConfigPreservesAndIsIdempotent(t *testing.T) {
 func TestRewriteConfigErrorsLeaveFileAlone(t *testing.T) {
 	for _, s := range []string{`{not json`, `[]`, `{"process":{"args":[1]}}`, `{}`} {
 		p := write(t, s)
-		if ch, err := RewriteConfig(p, opts); ch || err == nil {
-			t.Errorf("%s: %v %v", s, ch, err)
+		if res, err := RewriteConfig(p, opts); res.Wrapped || err == nil {
+			t.Errorf("%s: %v %v", s, res, err)
 		}
 		if b, _ := os.ReadFile(p); string(b) != s {
 			t.Errorf("%s modified", s)
 		}
 	}
-	if ch, err := RewriteConfig(filepath.Join(t.TempDir(), "none"), opts); ch || err == nil {
+	if res, err := RewriteConfig(filepath.Join(t.TempDir(), "none"), opts); res.Wrapped || err == nil {
 		t.Fatal("missing file")
 	}
 }
@@ -139,15 +139,15 @@ func TestSandbox(t *testing.T) {
 
 func TestRewriteProcess(t *testing.T) {
 	p := write(t, `{"args":["sh","-c","id"],"terminal":true,"future":1}`)
-	ch, err := RewriteProcess(p, opts)
-	if err != nil || !ch {
-		t.Fatal(ch, err)
+	res, err := RewriteProcess(p, opts)
+	if err != nil || !res.Wrapped {
+		t.Fatal(res, err)
 	}
 	m := read(t, p)
 	if m["future"].(float64) != 1 || m["terminal"] != true || m["args"].([]any)[0] != "/v3compat/bin/v3compat-run" {
 		t.Fatalf("%v", m)
 	}
-	if ch, _ := RewriteProcess(p, opts); ch {
+	if res, _ := RewriteProcess(p, opts); res.Wrapped {
 		t.Fatal("not idempotent")
 	}
 }
@@ -218,5 +218,82 @@ func TestImageName(t *testing.T) {
 	}
 	if n, _ := ImageName(write(t, `{}`)); n != "" {
 		t.Fatal(n)
+	}
+}
+
+func procEnv(t *testing.T, p string, top bool) []string {
+	m := read(t, p)
+	if top {
+		m = m["process"].(map[string]any)
+	}
+	e, _ := m["env"].([]any)
+	return toStrings(e)
+}
+
+func TestRewriteConfigEnv(t *testing.T) {
+	p := write(t, `{"process":{"args":["/app"],"env":["A=1","V3COMPAT_NATIVE=1","V3COMPAT_NATIVE_X=1","V3COMPAT_AUDIT=1","V3COMPAT_CACHE=/c","V3COMPAT_DR_OPTS=-x"]}}`)
+	o := opts
+	o.DROpts = "-no_hw_cache_consistency"
+	res, err := RewriteConfig(p, o)
+	if err != nil || !res.Wrapped || !reflect.DeepEqual(res.Removed, []string{"V3COMPAT_NATIVE", "V3COMPAT_AUDIT"}) {
+		t.Fatal(res, err)
+	}
+	want := []string{"A=1", "V3COMPAT_NATIVE_X=1", "V3COMPAT_CACHE=/c", "V3COMPAT_DR_OPTS=-no_hw_cache_consistency"}
+	if got := procEnv(t, p, true); !reflect.DeepEqual(got, want) {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestRewriteConfigEnvUntouchedWithoutDROpts(t *testing.T) {
+	p := write(t, `{"process":{"args":["/app"],"env":["V3COMPAT_DR_OPTS=-x"]}}`)
+	res, err := RewriteConfig(p, opts)
+	if err != nil || len(res.Removed) != 0 || !reflect.DeepEqual(procEnv(t, p, true), []string{"V3COMPAT_DR_OPTS=-x"}) {
+		t.Fatal(res, err, procEnv(t, p, true))
+	}
+	// No env key and nothing to set: none is created.
+	p = write(t, `{"process":{"args":["/app"]}}`)
+	if _, err := RewriteConfig(p, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := read(t, p)["process"].(map[string]any)["env"]; ok {
+		t.Fatal("env created")
+	}
+}
+
+func TestRewriteConfigEnvErrorLeavesFileAlone(t *testing.T) {
+	s := `{"process":{"args":["/app"],"env":["V3COMPAT_NATIVE=1",7]}}`
+	p := write(t, s)
+	if res, err := RewriteConfig(p, opts); err == nil || res.Wrapped {
+		t.Fatal(res, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != s {
+		t.Fatal("modified")
+	}
+}
+
+func TestRewriteEnvOnlyWhenWrapped(t *testing.T) {
+	// Already wrapped: args unchanged, so the env is left alone.
+	s := `{"args":["/v3compat/bin/v3compat-run","--","/app"],"env":["V3COMPAT_NATIVE=1"]}`
+	p := write(t, s)
+	o := opts
+	o.DROpts = "-x"
+	if res, err := RewriteProcess(p, o); err != nil || res.Wrapped || res.Removed != nil {
+		t.Fatal(res, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != s {
+		t.Fatal("modified")
+	}
+}
+
+func TestRewriteProcessEnv(t *testing.T) {
+	p := write(t, `{"args":["sh"],"env":["PATH=/","V3COMPAT_AUDIT=1","V3COMPAT_AUDIT=1"]}`)
+	o := opts
+	o.DROpts = "-x"
+	res, err := RewriteProcess(p, o)
+	if err != nil || !reflect.DeepEqual(res.Removed, []string{"V3COMPAT_AUDIT"}) {
+		t.Fatal(res, err)
+	}
+	if got := procEnv(t, p, false); !reflect.DeepEqual(got, []string{"PATH=/", "V3COMPAT_DR_OPTS=-x"}) {
+		t.Fatalf("%v", got)
 	}
 }

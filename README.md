@@ -27,21 +27,37 @@ container created through that handler, `v3compat-runtime`:
    DynamoRIO follows `exec` into child processes.
 
 **Fail-closed on translating nodes** (v3compat ADR 0004, amendment 2026-11-22). If `create`, `run` or `exec`
-cannot set up translation (invalid config, missing bundle, unparsable spec, no process file to rewrite), the
+cannot set up translation (invalid config, missing or incomplete bundle, unparsable spec, no process file to rewrite), the
 wrapper exits 1 without starting the real runtime: run natively there, a v3 program dies with SIGILL or, for
 lzcnt/tzcnt, silently computes bsr/bsf. The reason goes to stderr and to the runtime's `--log` file, where
-containerd reads it for "OCI runtime create failed" in the pod's events. An invalid config refuses on every node,
+containerd reads it for "OCI runtime create failed" in the pod's events. A bundle is complete only with `bin/v3compat-run`,
+`libexec/v3compat/libv3compat.so` and `libexec/v3compat/dynamorio/lib64/release/libdynamorio.so`. An invalid config refuses on every node,
 as the `native` flag cannot be read. A native node (`native = true` and CPUID x86-64-v3) never reads the bundle or
 spec, so nothing there can fail. Every other subcommand (`state`, `start`, `kill`, `delete`, ...) passes through
 unchanged, so existing containers can always be managed. Logs go to syslog (`v3compat-runtime`) and
 `/var/log/v3compat-runtime.log`; stdout is never written.
 
+**Container environment.** On `create`, `run` and `exec` of a wrapped container the wrapper removes
+`V3COMPAT_NATIVE` and `V3COMPAT_AUDIT` from the process env and logs it: a pod must not opt itself out of
+translation on a translating node (ADR 0004, amendment 2026-11-22), and audit mode runs off-list forms natively.
+`dr_opts`, if set, replaces the container's `V3COMPAT_DR_OPTS`. Every other `V3COMPAT_*` variable passes through.
+
 ### Translation cache mount
 
 If `cache_root` is set and the image reference (annotation `io.kubernetes.cri.image-name`) ends in
-`@sha256:<64 hex>`, and `<cache_root>/sha256-<hex>` is a directory, that directory is bind-mounted
-read-only at `/v3compat-cache` (executable: DynamoRIO may map entries). Otherwise nothing is mounted;
-`cache_root` itself never is. No environment variable is set: the launcher's cache option is later work.
+`@sha256:<64 hex>`, and `<cache_root>/sha256-<hex>` exists, that directory is bind-mounted read-only at
+`/v3compat-cache` (executable: DynamoRIO may map entries). `cache_root` itself never is. The wrapper mounts it only if
+both `cache_root` and that directory are real directories (checked with `lstat`, no symlinks), owned by uid 0 and not
+group- or other-writable; otherwise nothing is mounted and a warning names the path and the reason. A missing cache
+is not an error: the image translates fresh.
+
+When the wrapper adds the mount, it sets `V3COMPAT_CACHE=/v3compat-cache` in the process (a value the container sets
+wins) and marks `config.json` with the annotation `v3compat.cache=true`; `exec` into such a container gets the
+variable too, since containerd builds the exec process from its own spec. A spec that already mounts something at
+`/v3compat-cache` is left alone, with no variable. The launcher reads `<program>.pcache` files from the directory; it
+never writes there (that needs `V3COMPAT_CACHE_WRITE=1`, which a training pod may set for its own writable mount).
+
+Open: integrity beyond ownership (hash manifest, fs-verity; v3compat ADR 0006 amendment 2026-11-17) is not checked yet.
 
 ## Exit statuses
 
@@ -92,24 +108,58 @@ file; in an existing file only that line is rewritten (other keys stay; the conf
 Install the handler on every node that may run opted-in pods: a RuntimeClass whose handler is missing fails
 the pod.
 
+### Installer image (DaemonSet)
+
+`ghcr.io/lhns/v3compat-runtime-installer` installs onto the node it runs on, kata-deploy style: run it as a
+DaemonSet with the host root mounted at `HOST_ROOT` (read-write). Tags: `main` (pushes to main) and `vX.Y.Z`
+(the git tag). It runs as root, installs, then sleeps (so the pod stays `Running`; `--once` exits instead).
+It does **not** restart k0s or containerd; the handler loads at the next restart (a reboot rollout). New GHCR
+packages start private: make the package public, or give the cluster a pull secret.
+
+| env | default | meaning |
+| --- | --- | --- |
+| `HOST_ROOT` | `/host` | where the host root is mounted |
+| `NATIVE_NODE` | `false` | `true` or `false` (else: error, nothing installed); `native` in the config |
+| `DR_OPTS` | empty | config `dr_opts`; empty clears it |
+| `CACHE_ROOT` | empty | config `cache_root`, a host path; empty clears it. Created root-owned 0755 if missing (an existing directory is left alone) |
+| `CONTAINERD_CONFIG_VERSION` | `3` | `2` or `3`, the drop-in's containerd config version (see "k0s / containerd") |
+| `MODE` | `install` | `install` or `uninstall` (else: error); argument `--uninstall` is an alias |
+
+Files, under `HOST_ROOT`: `/usr/local/bin/v3compat-runtime`, `/opt/v3compat`, `/etc/v3compat-runtime/config.toml`,
+`/etc/k0s/containerd.d/50-v3compat-runtime.toml`. Paths written into them are host paths. Uninstall removes all
+but the config.
+
+It runs the same `install/install.sh`, which also takes `--root DIR` (prefix for every path written),
+`--dr-opts STR`, `--cache-root PATH` and `--containerd-config 2|3` (an empty string clears the key; values are
+written as escaped TOML strings, newlines refused).
+
+Re-running is idempotent and every file is replaced by rename. An identical bundle is left alone: containers
+bind-mount `/opt/v3compat`, and the pod restarts on every node reboot. A changed bundle is copied to
+`/opt/v3compat.new`, the old tree is renamed to `/opt/v3compat.prev` (replacing an older `.prev`) and the new
+one renamed into place; a rename keeps the old tree valid for containers that already mounted it. So one
+previous version survives until the next change. A reboot rollout is the supported way to upgrade.
+
 **Replacing an old SDE install.** The installer does not touch it. Remove it by hand: run the old
 version's `install.sh --uninstall`, or delete `/usr/local/bin/sde-runtime`, `/opt/sde-bundle`,
 `/etc/sde-runtime` and `/etc/k0s/containerd.d/50-sde-runtime.toml`, and the `sde` RuntimeClass.
 
 ## k0s / containerd
 
-`install/install.sh` writes `/etc/k0s/containerd.d/50-v3compat-runtime.toml` (containerd config v2 syntax):
+`install/install.sh` writes `/etc/k0s/containerd.d/50-v3compat-runtime.toml`. By default it is containerd 2 / config
+`version = 3` syntax with the systemd cgroup driver (`--containerd-config 3`):
 
 ```toml
-version = 2
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.v3compat]
+version = 3
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.v3compat]
   runtime_type = "io.containerd.runc.v2"
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.v3compat.options]
+  [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.v3compat.options]
     BinaryName = "/usr/local/bin/v3compat-runtime"
+    SystemdCgroup = true
 ```
 
-With containerd 2 / config `version = 3` the plugin is `io.containerd.cri.v1.runtime` instead of
-`io.containerd.grpc.v1.cri`. Restart k0s or containerd afterwards. Then:
+`--containerd-config 2` writes the config `version = 2` syntax instead (plugin `io.containerd.grpc.v1.cri`, no
+`SystemdCgroup`). Use it when the node's containerd config is version 2.
+Restart k0s or containerd afterwards. Then:
 
 ```yaml
 apiVersion: node.k8s.io/v1
@@ -135,6 +185,7 @@ init_paths   = ["/sbin/docker-init", "/run/podman-init", "/dev/init"]
 log_file     = "/var/log/v3compat-runtime.log"
 native       = false                     # true: run unwrapped if CPUID shows x86-64-v3 (install.sh --native)
 cache_root   = ""                        # translation cache directories, one per image digest; empty: off
+dr_opts      = ""                        # set as V3COMPAT_DR_OPTS (DynamoRIO options) in every wrapped container; empty: the container's own
 ```
 
 ## Development
@@ -143,8 +194,11 @@ cache_root   = ""                        # translation cache directories, one pe
     GOOS=linux GOARCH=amd64 go build ./cmd/v3compat-runtime
 
 CI also runs `test/e2e.sh`: the wrapper in front of runc with a bundle built from the pinned v3compat commit
-(`bundle/pin.env`), covering translated and native runs, exec, refusal without a bundle, statuses 86, 87, 125, 126 and 127 and the cache mount. The runner has AVX2, where
+(`bundle/pin.env`), covering translated and native runs, the env policy, exec, refusal without a complete bundle, statuses 86, 87, 125, 126 and 127 and the cache mount (also its ownership check). The runner has AVX2, where
 the client emulates anyway; Ivy Bridge coverage comes from v3compat's lab, not from here.
+The e2e job fills the bundle with `bundle/ci-get.sh`: while `bundle/pin.env` has no `V3COMPAT_VERSION` it builds
+`V3COMPAT_COMMIT` from source; once a release is pinned it downloads that release (sha256-verified) and fails unless the
+tag `v<version>` of lhns/v3compat points at `V3COMPAT_COMMIT`. `test/ci-get.sh` tests that choice and check.
 It also runs `test/install.sh` (install, `--native` on an existing config, uninstall).
 
 ## License

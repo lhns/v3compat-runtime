@@ -30,6 +30,12 @@ mkbundle() {
         "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
 }
 
+# addenv ENTRY...: append entries to the process env of the bundle in $b
+addenv() {
+    e=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+    jq --argjson e "$e" '.process.env += $e' "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
+}
+
 # check NAME WANT_STATUS WANT_OUT_REGEX ("-": any output) ; reads $status and the out/err files
 check() {
     if [ "$status" = "$2" ] && { [ "$3" = - ] || grep -Eq "$3" "$w/out"; }; then echo "ok   $1"; else
@@ -50,6 +56,20 @@ mkbundle translated 0 /probe translated
 run c1; check "translated: DynamoRIO mapped, results right" 0 'libdynamorio mapped=1'
 grep -q 'wrapped with v3compat-run' "$w/log" || { echo "FAIL no wrap log line"; fail=1; }
 
+# A pod must not opt itself out of translation: V3COMPAT_NATIVE and V3COMPAT_AUDIT are dropped.
+mkbundle envpolicy 0 /probe translated
+addenv V3COMPAT_NATIVE=1 V3COMPAT_AUDIT=1
+run c1e; check "container env V3COMPAT_NATIVE=1: still translated" 0 'libdynamorio mapped=1'
+grep -q 'removed V3COMPAT_NATIVE, V3COMPAT_AUDIT from the container env' "$w/log" || { echo "FAIL no env removal log line"; fail=1; }
+
+# dr_opts overrides the container's own V3COMPAT_DR_OPTS; the launcher puts it into DYNAMORIO_OPTIONS.
+conf 'dr_opts = "-msgbox_mask 0"'
+mkbundle dropts 0 /probe env DYNAMORIO_OPTIONS
+addenv V3COMPAT_DR_OPTS=-bogus_option
+run c1d; check "dr_opts reaches DynamoRIO" 0 'DYNAMORIO_OPTIONS=.*-msgbox_mask 0'
+grep -q bogus_option "$w/out" && { echo "FAIL container V3COMPAT_DR_OPTS not overridden"; fail=1; }
+conf 'native = false'
+
 conf 'native = true'
 mkbundle native 0 /probe native
 run c2; check "native=true on a v3 CPU: no DynamoRIO" 0 'libdynamorio mapped=0'
@@ -61,11 +81,12 @@ mkbundle execc 0 /probe wait
 "$wrapper" --root "$w/state" create --bundle "$b" c3 >/dev/null 2>&1
 "$wrapper" --root "$w/state" start c3
 cat > "$w/process.json" <<'JSON'
-{"terminal":false,"user":{"uid":0,"gid":0},"cwd":"/","env":["PATH=/"],"args":["/probe","translated"]}
+{"terminal":false,"user":{"uid":0,"gid":0},"cwd":"/","env":["PATH=/","V3COMPAT_NATIVE=1"],"args":["/probe","translated"]}
 JSON
 status=0
 "$wrapper" --root "$w/state" exec --process "$w/process.json" c3 >"$w/out" 2>"$w/err" || status=$?
 check "exec into a wrapped container is translated" 0 'libdynamorio mapped=1'
+grep -q 'exec c3: removed V3COMPAT_NATIVE from the container env' "$w/log" || { echo "FAIL no exec env removal log line"; fail=1; }
 "$runc" --root "$w/state" kill c3 KILL || true
 sleep 1; "$runc" --root "$w/state" delete -f c3 || true
 
@@ -93,12 +114,23 @@ run c10; check "program not found: status 127" 127 -
 mkbundle noexec 0 /probe-noexec
 cp "$probe" "$b/rootfs/probe-noexec"; chmod 644 "$b/rootfs/probe-noexec"
 run c11; check "program not executable: status 126" 126 -
-# A bundle copy without the client library makes the launcher itself fail.
-rm -rf "$w/bundle125"; cp -a "$bundle" "$w/bundle125"; rm -f "$w/bundle125/libexec/v3compat/libv3compat.so"
-real_bundle=$bundle; bundle=$w/bundle125; conf 'native = false'
+# A cache path the launcher cannot pass to DynamoRIO makes the launcher itself fail.
+bundle=$real_bundle; conf 'native = false'
 mkbundle launcher 0 /probe translated
+jq '.process.env += ["V3COMPAT_CACHE=/a\"b"]' "$b/config.json" > "$b/config.new" && mv "$b/config.new" "$b/config.json"
 run c12; check "launcher failure: status 125" 125 -
-grep -q 'cannot read' "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+grep -q 'may not contain a quote' "$w/err" || { echo "FAIL no launcher message on stderr"; fail=1; }
+
+# A bundle without the launcher's library is refused as well, before the container exists.
+rm -rf "$w/bundle-partial"; cp -a "$real_bundle" "$w/bundle-partial"
+rm "$w/bundle-partial/libexec/v3compat/libv3compat.so"
+bundle=$w/bundle-partial; conf 'native = false'
+mkbundle incomplete 0 /probe translated
+status=0
+"$wrapper" --root "$w/state" --log "$w/rlog" --log-format json run --bundle "$b" c13 >"$w/out" 2>"$w/err" || status=$?
+check "incomplete bundle on a translating node: refused" 1 -
+grep -q 'bundle incomplete at .*: missing libexec/v3compat/libv3compat.so' "$w/err" || { echo "FAIL no reason on stderr"; fail=1; }
+"$runc" --root "$w/state" state c13 >/dev/null 2>&1 && { echo "FAIL c13 exists"; fail=1; }
 bundle=$real_bundle; conf 'native = false'
 
 # The launcher refuses a setuid-root file run by another user: status 87.
@@ -108,6 +140,7 @@ run c4; check "setuid-root program as uid 65534: status 87" 87 -
 # cache mount: a pinned image with a cache directory gets it read-only; others get nothing.
 hex=$(printf 'a%.0s' $(seq 64))
 mkdir -p "$w/cache/sha256-$hex"; echo x > "$w/cache/sha256-$hex/entry"
+chmod 755 "$w/cache" "$w/cache/sha256-$hex"  # the wrapper mounts only root-owned, not group/other-writable directories
 conf "native = false
 cache_root = \"$w/cache\""
 ann=$(jq -n --arg i "r.example/app:1@sha256:$hex" '{"io.kubernetes.cri.image-name":$i}')
@@ -120,5 +153,36 @@ for img in "r.example/app:1" "r.example/app@sha256:$(printf 'b%.0s' $(seq 64))" 
     run c6; check "cache: $img mounts nothing" 0 'exists=0'
     "$runc" --root "$w/state" delete -f c6 >/dev/null 2>&1 || true
 done
+
+# The launcher gets V3COMPAT_CACHE; the directory has no .pcache files, which must be a plain miss
+# (the cache-ro case above already runs under -pcache_dir).
+ann=$(jq -n --arg i "r.example/app:1@sha256:$hex" '{"io.kubernetes.cri.image-name":$i}')
+mkbundle cacheenv 0 /probe env V3COMPAT_CACHE
+run c5e; check "cache: V3COMPAT_CACHE points at the mount" 0 '^V3COMPAT_CACHE=/v3compat-cache$'
+
+# exec: containerd's exec spec lacks the variable, the wrapper adds it.
+mkbundle cacheexec 0 /probe wait
+"$wrapper" --root "$w/state" create --bundle "$b" c5x >/dev/null 2>&1
+"$wrapper" --root "$w/state" start c5x
+cat > "$w/process.json" <<'JSON'
+{"terminal":false,"user":{"uid":0,"gid":0},"cwd":"/","env":["PATH=/"],"args":["/probe","env","V3COMPAT_CACHE"]}
+JSON
+status=0
+"$wrapper" --root "$w/state" exec --process "$w/process.json" c5x >"$w/out" 2>"$w/err" || status=$?
+check "cache: exec gets V3COMPAT_CACHE" 0 '^V3COMPAT_CACHE=/v3compat-cache$'
+"$runc" --root "$w/state" kill c5x KILL || true
+sleep 1; "$runc" --root "$w/state" delete -f c5x || true
+
+# A directory that is not root-owned or is writable by group/others is not mounted: warning, no mount.
+chmod g+w "$w/cache/sha256-$hex"
+mkbundle cachegw 0 /probe cache-none /v3compat-cache
+run c5g; check "cache: group-writable digest directory mounts nothing" 0 'exists=0'
+grep -q "warn: c5g: translation cache not mounted: $w/cache/sha256-$hex: .*writable by group or others" "$w/log" || { echo "FAIL no cache warning (g+w)"; fail=1; }
+chmod g-w "$w/cache/sha256-$hex"
+chown 65534 "$w/cache"
+mkbundle cacheroot 0 /probe cache-none /v3compat-cache
+run c5r; check "cache: cache_root not owned by root mounts nothing" 0 'exists=0'
+grep -q "warn: c5r: translation cache not mounted: $w/cache: .*not owned by uid 0" "$w/log" || { echo "FAIL no cache warning (owner)"; fail=1; }
+chown 0 "$w/cache"
 
 exit $fail
