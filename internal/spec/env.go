@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -62,12 +63,21 @@ func removeEnv(m map[string]any, names ...string) ([]string, error) {
 	return removed, nil
 }
 
-// setEnv replaces every entry for key with a single KEY=VALUE at the end.
+// setEnv replaces every entry for key with a single KEY=VALUE at the end. A lone entry that
+// already has the value stays where it is, so a repeated edit changes nothing.
 func setEnv(m map[string]any, key, value string) error {
+	entries, err := envEntries(m)
+	if err != nil {
+		return err
+	}
+	own := slices.DeleteFunc(slices.Clone(entries), func(e string) bool { return envKey(e) != key })
+	if len(own) == 1 && own[0] == key+"="+value {
+		return nil
+	}
 	if _, err := removeEnv(m, key); err != nil {
 		return err
 	}
-	entries, _ := envEntries(m)
+	entries, _ = envEntries(m)
 	putEnv(m, append(entries, key+"="+value))
 	return nil
 }

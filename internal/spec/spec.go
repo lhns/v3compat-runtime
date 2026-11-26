@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -46,11 +47,11 @@ func ImageDigest(image string) (string, bool) {
 	return m[1], true
 }
 
-// WrapArgs prefixes args with the launcher. It reports false if args are already wrapped
-// or empty.
-func WrapArgs(args []string, o Options) ([]string, bool) {
+// wrapPoint returns the index in args where the launcher belongs (after an init path's "--"),
+// and whether args are non-empty with that index in range.
+func wrapPoint(args []string, o Options) (int, bool) {
 	if len(args) == 0 {
-		return args, false
+		return 0, false
 	}
 	at := 0
 	for _, init := range o.InitPaths {
@@ -65,7 +66,14 @@ func WrapArgs(args []string, o Options) ([]string, bool) {
 		}
 		break
 	}
-	if at >= len(args) || args[at] == Launcher {
+	return at, at < len(args)
+}
+
+// WrapArgs prefixes args with the launcher. It reports false if args are already wrapped
+// (the launcher first, or right after an init path and its "--") or empty.
+func WrapArgs(args []string, o Options) ([]string, bool) {
+	at, ok := wrapPoint(args, o)
+	if !ok || args[at] == Launcher {
 		return args, false
 	}
 	out := append([]string{}, args[:at]...)
@@ -128,16 +136,17 @@ func save(path string, d doc, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-func rewriteArgs(m map[string]any, o Options) (bool, error) {
+// rewriteArgs wraps process.args. changed reports that it did; already that they were wrapped before.
+func rewriteArgs(m map[string]any, o Options) (changed, already bool, err error) {
 	raw, ok := m["args"].([]any)
 	if !ok || len(raw) == 0 {
-		return false, nil
+		return false, false, nil
 	}
 	args := make([]string, len(raw))
 	for i, e := range raw {
 		s, ok := e.(string)
 		if !ok {
-			return false, fmt.Errorf("process.args has a non-string entry")
+			return false, false, fmt.Errorf("process.args has a non-string entry")
 		}
 		args[i] = s
 	}
@@ -148,13 +157,15 @@ func rewriteArgs(m map[string]any, o Options) (bool, error) {
 			out[i] = s
 		}
 		m["args"] = out
+		return true, false, nil
 	}
-	return changed, nil
+	_, inRange := wrapPoint(args, o)
+	return false, inRange, nil
 }
 
-// Result reports what a rewrite did. Nothing is edited unless Wrapped.
+// Result reports what a rewrite did.
 type Result struct {
-	Wrapped bool
+	Wrapped bool     // the args were changed (wrapped by us)
 	Removed []string // env names dropped from the process
 }
 
@@ -163,22 +174,23 @@ type Result struct {
 // off-list forms natively.
 var envDropped = []string{"V3COMPAT_NATIVE", "V3COMPAT_AUDIT"}
 
-// rewriteProcess wraps the args of a runtime-spec Process map and, if they were wrapped, edits its env.
-func rewriteProcess(m map[string]any, o Options) (Result, error) {
-	changed, err := rewriteArgs(m, o)
-	if err != nil || !changed {
-		return Result{}, err
+// rewriteProcess wraps the args of a runtime-spec Process map and edits its env when it wrapped
+// them, or, with editWrapped, when they already were. ran reports that the env was edited.
+func rewriteProcess(m map[string]any, o Options, editWrapped bool) (res Result, ran bool, err error) {
+	changed, already, err := rewriteArgs(m, o)
+	if err != nil || !(changed || (already && editWrapped)) {
+		return Result{}, false, err
 	}
 	removed, err := removeEnv(m, envDropped...)
 	if err != nil {
-		return Result{}, err
+		return Result{}, false, err
 	}
 	if o.DROpts != "" {
 		if err := setEnv(m, "V3COMPAT_DR_OPTS", o.DROpts); err != nil {
-			return Result{}, err
+			return Result{}, false, err
 		}
 	}
-	return Result{Wrapped: true, Removed: removed}, nil
+	return Result{Wrapped: changed, Removed: removed}, true, nil
 }
 
 func annotations(d doc) map[string]any {
@@ -220,7 +232,9 @@ func RewriteConfig(path string, o Options) (Result, error) {
 	if !ok {
 		return Result{}, fmt.Errorf("%s: no process", path)
 	}
-	res, err := rewriteProcess(p, o)
+	// A command that already starts with the launcher is left alone: no bundle is mounted, so the
+	// launcher is the image's own file and runs its own binary natively anyway.
+	res, _, err := rewriteProcess(p, o, false)
 	if err != nil || !res.Wrapped {
 		return Result{}, err
 	}
@@ -282,21 +296,31 @@ func HasCache(path string) (bool, error) {
 	return annotations(d)[AnnotationCache] == "true", nil
 }
 
-// RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process) and edits its env. With
-// o.ExecCache it also points the process at the cache mount, which containerd's own exec spec lacks.
+// RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process) and edits its env.
+// Args that already start with the launcher get the same env edits: the image env can carry
+// V3COMPAT_NATIVE into them. With o.ExecCache it also points the process at the cache mount,
+// which containerd's own exec spec lacks. The file is written only if something changed.
 func RewriteProcess(path string, o Options) (Result, error) {
 	d, mode, err := load(path)
 	if err != nil {
 		return Result{}, err
 	}
-	res, err := rewriteProcess(d, o)
-	if err != nil || !res.Wrapped {
+	before, err := envEntries(d)
+	if err != nil {
+		return Result{}, err
+	}
+	res, ran, err := rewriteProcess(d, o, true)
+	if err != nil || !ran {
 		return Result{}, err
 	}
 	if o.ExecCache {
 		if err := setEnvIfAbsent(d, EnvCache, CacheMount); err != nil {
 			return Result{}, err
 		}
+	}
+	after, _ := envEntries(d)
+	if !res.Wrapped && slices.Equal(before, after) {
+		return res, nil
 	}
 	return res, save(path, d, mode)
 }

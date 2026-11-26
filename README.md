@@ -40,6 +40,7 @@ unchanged, so existing containers can always be managed. Logs go to syslog (`v3c
 **Container environment.** On `create`, `run` and `exec` of a wrapped container the wrapper removes
 `V3COMPAT_NATIVE` and `V3COMPAT_AUDIT` from the process env and logs it: a pod must not opt itself out of
 translation on a translating node (ADR 0004, amendment 2026-11-22), and audit mode runs off-list forms natively.
+An `exec` whose args already start with the launcher gets the same env edits.
 `dr_opts`, if set, replaces the container's `V3COMPAT_DR_OPTS`. Every other `V3COMPAT_*` variable passes through.
 
 ### Translation cache mount

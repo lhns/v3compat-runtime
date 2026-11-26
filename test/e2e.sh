@@ -87,6 +87,13 @@ status=0
 "$wrapper" --root "$w/state" exec --process "$w/process.json" c3 >"$w/out" 2>"$w/err" || status=$?
 check "exec into a wrapped container is translated" 0 'libdynamorio mapped=1'
 grep -q 'exec c3: removed V3COMPAT_NATIVE from the container env' "$w/log" || { echo "FAIL no exec env removal log line"; fail=1; }
+# An exec whose args already start with the launcher still loses the image env's V3COMPAT_NATIVE.
+cat > "$w/process.json" <<'JSON'
+{"terminal":false,"user":{"uid":0,"gid":0},"cwd":"/","env":["PATH=/","V3COMPAT_NATIVE=1"],"args":["/v3compat/bin/v3compat-run","--","/probe","translated"]}
+JSON
+status=0
+"$wrapper" --root "$w/state" exec --process "$w/process.json" c3 >"$w/out" 2>"$w/err" || status=$?
+check "exec already wrapped, V3COMPAT_NATIVE=1: still translated" 0 'libdynamorio mapped=1'
 "$runc" --root "$w/state" kill c3 KILL || true
 sleep 1; "$runc" --root "$w/state" delete -f c3 || true
 
