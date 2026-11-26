@@ -80,10 +80,10 @@ An exec refused deeper in the process tree fails with EPERM or ENOEXEC and a mes
 
 v3compat and DynamoRIO may be redistributed; their notices are in the bundle's `share/doc/v3compat/`.
 
-**No v3compat release exists yet**: the owner cuts the first once the open crashes are fixed. Until then build the
-bundle with `bundle/get.sh --source` (the commit pinned in `bundle/pin.env`, the one CI tests).
+The release pinned in `bundle/pin.env` (v3compat 0.1.0) needs no build tools: `bundle/get.sh` downloads it and
+verifies its sha256. `--source` builds the pinned commit instead.
 
-    bundle/get.sh                    # the release pinned in bundle/pin.env; refuses while none is pinned
+    bundle/get.sh                    # download the release pinned in bundle/pin.env, verify its sha256
     bundle/get.sh --source           # build the pinned commit: cmake, gcc, g++, git, patch, zlib1g-dev; ~10 min first time
     bundle/get.sh --tarball PATH     # a local release tarball; prints its sha256
     go build -o v3compat-runtime ./cmd/v3compat-runtime
