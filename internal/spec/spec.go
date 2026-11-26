@@ -19,12 +19,15 @@ const (
 	BundleMount       = "/v3compat"
 	Launcher          = "/v3compat/bin/v3compat-run"
 	CacheMount        = "/v3compat-cache"
+	EnvCache          = "V3COMPAT_CACHE"
+	AnnotationCache   = "v3compat.cache"
 )
 
 type Options struct {
 	BundlePath string   // host path of the v3compat bundle, mounted at /v3compat
 	CacheDir   string   // host directory mounted read-only at /v3compat-cache; empty for none
 	InitPaths  []string // init binaries that stay native and run the launcher as their child
+	ExecCache  bool     // RewriteProcess sets V3COMPAT_CACHE (the container has our cache mount)
 	DROpts     string   // V3COMPAT_DR_OPTS for the container process; empty keeps the container's own
 }
 
@@ -222,8 +225,12 @@ func RewriteConfig(path string, o Options) (Result, error) {
 		return Result{}, err
 	}
 	addMount(d, BundleMount, o.BundlePath)
-	if o.CacheDir != "" {
-		addMount(d, CacheMount, o.CacheDir)
+	cached := o.CacheDir != "" && addMount(d, CacheMount, o.CacheDir)
+	if cached {
+		// Only a mount of ours: a spec that mounts something at CacheMount holds no cache of ours.
+		if err := setEnvIfAbsent(p, EnvCache, CacheMount); err != nil {
+			return Result{}, err
+		}
 	}
 	a := annotations(d)
 	if a == nil {
@@ -231,16 +238,19 @@ func RewriteConfig(path string, o Options) (Result, error) {
 		d["annotations"] = a
 	}
 	a[AnnotationWrapped] = "true"
+	if cached {
+		a[AnnotationCache] = "true"
+	}
 	return res, save(path, d, mode)
 }
 
-// addMount adds a read-only bind of src at dest unless the spec already mounts something there.
-// noexec is left off: DynamoRIO may map files from the cache.
-func addMount(d doc, dest, src string) {
+// addMount adds a read-only bind of src at dest unless the spec already mounts something there,
+// and reports whether it did. noexec is left off: DynamoRIO may map files from the cache.
+func addMount(d doc, dest, src string) bool {
 	mounts, _ := d["mounts"].([]any)
 	for _, e := range mounts {
 		if m, _ := e.(map[string]any); m["destination"] == dest {
-			return
+			return false
 		}
 	}
 	b, _ := json.Marshal(specs.Mount{
@@ -250,6 +260,7 @@ func addMount(d doc, dest, src string) {
 	var m any
 	_ = json.Unmarshal(b, &m)
 	d["mounts"] = append(mounts, m)
+	return true
 }
 
 // ImageName returns the io.kubernetes.cri.image-name annotation of config.json, or "".
@@ -262,7 +273,17 @@ func ImageName(path string) (string, error) {
 	return s, nil
 }
 
-// RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process) and edits its env.
+// HasCache reports whether config.json carries the marker set when RewriteConfig added the cache mount.
+func HasCache(path string) (bool, error) {
+	d, _, err := load(path)
+	if err != nil {
+		return false, err
+	}
+	return annotations(d)[AnnotationCache] == "true", nil
+}
+
+// RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process) and edits its env. With
+// o.ExecCache it also points the process at the cache mount, which containerd's own exec spec lacks.
 func RewriteProcess(path string, o Options) (Result, error) {
 	d, mode, err := load(path)
 	if err != nil {
@@ -271,6 +292,11 @@ func RewriteProcess(path string, o Options) (Result, error) {
 	res, err := rewriteProcess(d, o)
 	if err != nil || !res.Wrapped {
 		return Result{}, err
+	}
+	if o.ExecCache {
+		if err := setEnvIfAbsent(d, EnvCache, CacheMount); err != nil {
+			return Result{}, err
+		}
 	}
 	return res, save(path, d, mode)
 }

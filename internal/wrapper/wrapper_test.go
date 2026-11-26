@@ -21,7 +21,8 @@ type env struct {
 	logs   []string
 	v3     bool
 	state  func(string, []string, string) (string, error)
-	err    error // of the last prepare
+	err    error              // of the last prepare
+	trust  func(string) error // Deps.TrustedDir override
 }
 
 const appCfg = `{"process":{"args":["/app"]},"annotations":{"io.kubernetes.cri.container-type":"container"}}`
@@ -52,6 +53,7 @@ func (e *env) prepare(args ...string) string {
 		Logf:       func(_, f string, a ...any) { e.logs = append(e.logs, fmt.Sprintf(f, a...)) },
 		State:      e.state,
 		Getwd:      func() (string, error) { return e.bundle, nil },
+		TrustedDir: e.trusted,
 	})
 	e.err = err
 	if err != nil && real != "" {
