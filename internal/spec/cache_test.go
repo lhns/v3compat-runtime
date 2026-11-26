@@ -69,7 +69,7 @@ func TestCacheEnvNonStringFailsClosed(t *testing.T) {
 	o.CacheDir = "/cache/sha256-ab"
 	s := `{"process":{"args":["/app"],"env":[1]}}`
 	p := write(t, s)
-	if ch, err := RewriteConfig(p, o); ch || err == nil || mustRead(p) != s {
+	if ch, err := RewriteConfig(p, o); ch.Wrapped || err == nil || mustRead(p) != s {
 		t.Fatal(ch, err)
 	}
 }
@@ -78,7 +78,7 @@ func TestRewriteProcessExecCache(t *testing.T) {
 	o := opts
 	o.ExecCache = true
 	p := write(t, `{"args":["sh"],"env":["PATH=/"]}`)
-	if ch, err := RewriteProcess(p, o); !ch || err != nil {
+	if ch, err := RewriteProcess(p, o); !ch.Wrapped || err != nil {
 		t.Fatal(ch, err)
 	}
 	if got := read(t, p)["env"]; !reflect.DeepEqual(got, []any{"PATH=/", "V3COMPAT_CACHE=/v3compat-cache"}) {
@@ -87,7 +87,7 @@ func TestRewriteProcessExecCache(t *testing.T) {
 	// Args not wrapped: nothing is edited.
 	s := `{"args":["/v3compat/bin/v3compat-run","--","sh"]}`
 	p = write(t, s)
-	if ch, _ := RewriteProcess(p, o); ch || mustRead(p) != s {
+	if ch, _ := RewriteProcess(p, o); ch.Wrapped || mustRead(p) != s {
 		t.Fatal("edited")
 	}
 	// Without ExecCache no env is set.

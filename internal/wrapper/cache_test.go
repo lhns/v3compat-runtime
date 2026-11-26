@@ -1,7 +1,6 @@
 package wrapper
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,14 +17,6 @@ func (e *env) trusted(p string) error {
 		return fmt.Errorf("%s: not a directory", p)
 	}
 	return nil
-}
-
-func (e *env) procEnvOf(path string) []any {
-	b, _ := os.ReadFile(path)
-	var m map[string]any
-	must(json.Unmarshal(b, &m))
-	l, _ := m["env"].([]any)
-	return l
 }
 
 func digestImage(hex string) string { return "r.io/x:1@sha256:" + strings.Repeat(hex, 64) }
@@ -121,7 +112,7 @@ func (e *env) execWith(process string) string {
 	must(os.WriteFile(proc, []byte(process), 0o644))
 	e.state = func(string, []string, string) (string, error) { return e.bundle, nil }
 	e.prepare("exec", "--process", proc, "c1")
-	return fmt.Sprint(e.procEnvOf(proc))
+	return fmt.Sprint(e.procEnvOf(proc, false))
 }
 
 func TestExecGetsCacheEnv(t *testing.T) {

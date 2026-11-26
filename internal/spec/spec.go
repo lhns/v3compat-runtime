@@ -28,6 +28,7 @@ type Options struct {
 	CacheDir   string   // host directory mounted read-only at /v3compat-cache; empty for none
 	InitPaths  []string // init binaries that stay native and run the launcher as their child
 	ExecCache  bool     // RewriteProcess sets V3COMPAT_CACHE (the container has our cache mount)
+	DROpts     string   // V3COMPAT_DR_OPTS for the container process; empty keeps the container's own
 }
 
 func prefix() []string { return []string{Launcher, "--"} }
@@ -151,6 +152,35 @@ func rewriteArgs(m map[string]any, o Options) (bool, error) {
 	return changed, nil
 }
 
+// Result reports what a rewrite did. Nothing is edited unless Wrapped.
+type Result struct {
+	Wrapped bool
+	Removed []string // env names dropped from the process
+}
+
+// envDropped are removed from a wrapped container's env: V3COMPAT_NATIVE would let a pod opt itself
+// out of translation on a translating node (ADR 0004 amendment 2026-11-22), V3COMPAT_AUDIT runs
+// off-list forms natively.
+var envDropped = []string{"V3COMPAT_NATIVE", "V3COMPAT_AUDIT"}
+
+// rewriteProcess wraps the args of a runtime-spec Process map and, if they were wrapped, edits its env.
+func rewriteProcess(m map[string]any, o Options) (Result, error) {
+	changed, err := rewriteArgs(m, o)
+	if err != nil || !changed {
+		return Result{}, err
+	}
+	removed, err := removeEnv(m, envDropped...)
+	if err != nil {
+		return Result{}, err
+	}
+	if o.DROpts != "" {
+		if err := setEnv(m, "V3COMPAT_DR_OPTS", o.DROpts); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{Wrapped: true, Removed: removed}, nil
+}
+
 func annotations(d doc) map[string]any {
 	a, _ := d["annotations"].(map[string]any)
 	return a
@@ -181,25 +211,25 @@ func IsWrapped(path string) (bool, error) {
 }
 
 // RewriteConfig wraps the container of a bundle's config.json. It is idempotent.
-func RewriteConfig(path string, o Options) (bool, error) {
+func RewriteConfig(path string, o Options) (Result, error) {
 	d, mode, err := load(path)
 	if err != nil {
-		return false, err
+		return Result{}, err
 	}
 	p, ok := d["process"].(map[string]any)
 	if !ok {
-		return false, fmt.Errorf("%s: no process", path)
+		return Result{}, fmt.Errorf("%s: no process", path)
 	}
-	changed, err := rewriteArgs(p, o)
-	if err != nil || !changed {
-		return false, err
+	res, err := rewriteProcess(p, o)
+	if err != nil || !res.Wrapped {
+		return Result{}, err
 	}
 	addMount(d, BundleMount, o.BundlePath)
 	cached := o.CacheDir != "" && addMount(d, CacheMount, o.CacheDir)
 	if cached {
 		// Only a mount of ours: a spec that mounts something at CacheMount holds no cache of ours.
 		if err := setEnvIfAbsent(p, EnvCache, CacheMount); err != nil {
-			return false, err
+			return Result{}, err
 		}
 	}
 	a := annotations(d)
@@ -211,7 +241,7 @@ func RewriteConfig(path string, o Options) (bool, error) {
 	if cached {
 		a[AnnotationCache] = "true"
 	}
-	return true, save(path, d, mode)
+	return res, save(path, d, mode)
 }
 
 // addMount adds a read-only bind of src at dest unless the spec already mounts something there,
@@ -252,21 +282,21 @@ func HasCache(path string) (bool, error) {
 	return annotations(d)[AnnotationCache] == "true", nil
 }
 
-// RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process). With
+// RewriteProcess wraps the args of an exec process file (a bare runtime-spec Process) and edits its env. With
 // o.ExecCache it also points the process at the cache mount, which containerd's own exec spec lacks.
-func RewriteProcess(path string, o Options) (bool, error) {
+func RewriteProcess(path string, o Options) (Result, error) {
 	d, mode, err := load(path)
 	if err != nil {
-		return false, err
+		return Result{}, err
 	}
-	changed, err := rewriteArgs(d, o)
-	if err != nil || !changed {
-		return false, err
+	res, err := rewriteProcess(d, o)
+	if err != nil || !res.Wrapped {
+		return Result{}, err
 	}
 	if o.ExecCache {
 		if err := setEnvIfAbsent(d, EnvCache, CacheMount); err != nil {
-			return false, err
+			return Result{}, err
 		}
 	}
-	return true, save(path, d, mode)
+	return res, save(path, d, mode)
 }
