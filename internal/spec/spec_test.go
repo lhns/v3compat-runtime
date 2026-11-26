@@ -272,17 +272,72 @@ func TestRewriteConfigEnvErrorLeavesFileAlone(t *testing.T) {
 }
 
 func TestRewriteEnvOnlyWhenWrapped(t *testing.T) {
-	// Already wrapped: args unchanged, so the env is left alone.
-	s := `{"args":["/v3compat/bin/v3compat-run","--","/app"],"env":["V3COMPAT_NATIVE=1"]}`
+	// Create: a command that already starts with the launcher is left alone, env included.
+	s := `{"process":{"args":["/v3compat/bin/v3compat-run","--","/app"],"env":["V3COMPAT_NATIVE=1"]}}`
 	p := write(t, s)
 	o := opts
 	o.DROpts = "-x"
-	if res, err := RewriteProcess(p, o); err != nil || res.Wrapped || res.Removed != nil {
+	if res, err := RewriteConfig(p, o); err != nil || res.Wrapped || res.Removed != nil {
 		t.Fatal(res, err)
 	}
 	if b, _ := os.ReadFile(p); string(b) != s {
 		t.Fatal("modified")
 	}
+}
+
+func TestRewriteProcessAlreadyWrapped(t *testing.T) {
+	o := opts
+	o.DROpts = "-x"
+	o.ExecCache = true
+	for _, args := range []string{
+		`["/v3compat/bin/v3compat-run","--","/probe"]`,
+		`["/dev/init","--","/v3compat/bin/v3compat-run","--","/probe"]`,
+	} {
+		p := write(t, `{"args":`+args+`,"env":["PATH=/","V3COMPAT_NATIVE=1","V3COMPAT_AUDIT=1"]}`)
+		res, err := RewriteProcess(p, o)
+		if err != nil || res.Wrapped || !reflect.DeepEqual(res.Removed, []string{"V3COMPAT_NATIVE", "V3COMPAT_AUDIT"}) {
+			t.Fatal(res, err)
+		}
+		want := []string{"PATH=/", "V3COMPAT_DR_OPTS=-x", "V3COMPAT_CACHE=/v3compat-cache"}
+		if got := procEnv(t, p, false); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%v", got)
+		}
+		if got := toStrings(read(t, p)["args"].([]any)); !reflect.DeepEqual(got, mustStrings(t, args)) {
+			t.Fatalf("args changed: %v", got)
+		}
+		// A second pass changes nothing.
+		before, _ := os.ReadFile(p)
+		if res, err := RewriteProcess(p, o); err != nil || res.Wrapped || res.Removed != nil {
+			t.Fatal(res, err)
+		}
+		if after, _ := os.ReadFile(p); string(after) != string(before) {
+			t.Fatal("second pass modified")
+		}
+	}
+}
+
+func TestRewriteProcessUnwrappableUntouched(t *testing.T) {
+	// Empty args, or an init path with nothing after "--": no launcher position, no edits.
+	for _, s := range []string{
+		`{"args":[],"env":["V3COMPAT_NATIVE=1"]}`,
+		`{"args":["/dev/init","--"],"env":["V3COMPAT_NATIVE=1"]}`,
+	} {
+		p := write(t, s)
+		if res, err := RewriteProcess(p, opts); err != nil || res.Wrapped || res.Removed != nil {
+			t.Fatal(res, err)
+		}
+		if b, _ := os.ReadFile(p); string(b) != s {
+			t.Fatal("modified")
+		}
+	}
+}
+
+func mustStrings(t *testing.T, js string) []string {
+	var out []string
+	if err := json.Unmarshal([]byte(js), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestRewriteProcessEnv(t *testing.T) {

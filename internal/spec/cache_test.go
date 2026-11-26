@@ -84,11 +84,13 @@ func TestRewriteProcessExecCache(t *testing.T) {
 	if got := read(t, p)["env"]; !reflect.DeepEqual(got, []any{"PATH=/", "V3COMPAT_CACHE=/v3compat-cache"}) {
 		t.Fatalf("%v", got)
 	}
-	// Args not wrapped: nothing is edited.
-	s := `{"args":["/v3compat/bin/v3compat-run","--","sh"]}`
-	p = write(t, s)
-	if ch, _ := RewriteProcess(p, o); ch.Wrapped || mustRead(p) != s {
-		t.Fatal("edited")
+	// Already wrapped: args stay, the cache env is still set.
+	p = write(t, `{"args":["/v3compat/bin/v3compat-run","--","sh"]}`)
+	if ch, err := RewriteProcess(p, o); ch.Wrapped || err != nil {
+		t.Fatal(ch, err)
+	}
+	if got := read(t, p)["env"]; !reflect.DeepEqual(got, []any{"V3COMPAT_CACHE=/v3compat-cache"}) {
+		t.Fatalf("%v", got)
 	}
 	// Without ExecCache no env is set.
 	p = write(t, `{"args":["sh"]}`)
